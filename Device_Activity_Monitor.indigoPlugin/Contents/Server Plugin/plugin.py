@@ -3,8 +3,22 @@
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Sonnet 4.6
-# Date:        13-05-2026
-# Version:     1.9.3
+# Date:        14-05-2026
+# Version:     1.9.4
+#
+# v1.9.4 (14-05-2026):
+# - Discovery now correctly classifies multi-capability Aqara presence
+#   sensors (PS-S04D, FP1, etc.) as motion devices. Z2M classifies these
+#   by their primary capability (temperature/humidity/illuminance) and
+#   doesn't set has_occupancy/has_presence/has_pir, so v1.9.2's "trust
+#   Z2M when it identified the type" rule wrongly excluded them.
+#   Fix: positive signal from `pirDetection` or `presenceDetectionOptions`
+#   in the device's state list — these are Aqara-specific and only
+#   appear on real presence devices.
+# - _disc_motion_states now emits BOTH motion and pirDetection for these
+#   devices because they're independent physical signals (mmWave-derived
+#   presence vs raw PIR). Other Z2M presence sensors still get a single
+#   entry per the v1.9.2 priority dedup.
 #
 # v1.9.3 (13-05-2026):
 # - Add on_value / off_value config keys for explicit value matching on
@@ -1266,15 +1280,29 @@ class Plugin(indigo.PluginBase):
 
         Decision order (first match wins):
           1. Z2M bridge has_occupancy / has_presence / has_pir — authoritative.
-          2. deviceTypeId hint — z2mOccupancySensor wins.
-          3. Known motion state name in dev.states.
-          4. Motion keyword in name AND no exclusion keyword AND dev has onState.
+          2. Multi-capability Aqara-style sensor — Z2M identifies the device by
+             its primary capabilities (temperature/humidity/illuminance) but
+             does NOT set has_occupancy/has_presence/has_pir even though the
+             device also exposes presence. Detected by the presence of either
+             a `pirDetection` state or a `presenceDetectionOptions` config
+             state (Aqara FP1/PS-S04D etc.). These are real signals, not the
+             stub fields v1.9.2 was guarding against.
+          3. deviceTypeId hint — z2mOccupancySensor wins.
+          4. Known motion state name in dev.states.
+          5. Motion keyword in name AND no exclusion keyword AND dev has onState.
 
         Contact sensors (already caught by _disc_is_contact) are excluded by
         the caller using elif.
         """
         z2m_caps = self._disc_z2m_capabilities(dev)
         if any(z2m_caps.get(k) is True for k in ("has_occupancy", "has_presence", "has_pir")):
+            return True
+        # Multi-capability Aqara presence sensors: Z2M's has_* flags miss
+        # the presence capability because it classifies by primary sensor.
+        # `pirDetection` and `presenceDetectionOptions` are Aqara-specific
+        # states that ONLY appear on real presence devices — using their
+        # presence as a positive signal is safe.
+        if "pirDetection" in states or "presenceDetectionOptions" in states:
             return True
         # If Z2M has identified a non-motion type (water_leak, temperature,
         # humidity, contact, etc.) then this is NOT a motion device — ignore
@@ -1303,15 +1331,29 @@ class Plugin(indigo.PluginBase):
         return any(kw in name_lower for kw in _MOTION_NAME_KEYWORDS)
 
     def _disc_motion_states(self, states):
-        """Return the single preferred motion state name as a one-element list.
+        """Return the motion state names to monitor for this device.
 
-        Multi-state Z2M presence sensors typically expose every variant
-        (motion, occupancy, presence, pirDetection) — emitting a config entry
-        per state means 3-4 identical log lines on each trip. Walk the
-        priority list (occupancy first, motion last) and pick the first
-        match; only fall back to ["onState"] if no motion-state name is
-        present at all.
+        For most Z2M devices, return a one-element list: the single highest-
+        priority motion state, to avoid 3-4 duplicate log lines when a device
+        reports motion / occupancy / presence / pirDetection synchronously
+        on the same trip (v1.9.2 dedup).
+
+        Aqara-style multi-capability sensors (PS-S04D, FP1, etc.) are the
+        exception: their `pirDetection` is an independent raw-PIR signal,
+        and `motion` is the fused mmWave-derived presence — they fire on
+        different physical events and BOTH are useful to log. Detected by
+        the presence of `pirDetection` in the state list: emit one mmWave/
+        occupancy state (priority order) plus pirDetection.
         """
+        state_names = set(states.keys())
+        if "pirDetection" in state_names:
+            results = []
+            for preferred in ("occupancy", "presence", "motion", "motionDetected"):
+                if preferred in state_names:
+                    results.append(preferred)
+                    break
+            results.append("pirDetection")
+            return results
         for preferred in _MOTION_STATE_PRIORITY:
             if preferred in states:
                 return [preferred]
