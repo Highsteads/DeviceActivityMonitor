@@ -1,94 +1,349 @@
-# Sensor Monitor — Indigo Plugin
+# Device Activity Monitor — Indigo Plugin
 
-**Version**: 1.5.9
+**Version**: 1.9.0
 **Author**: CliveS
-**Platform**: Indigo 2025.1 / macOS / Python 3.11
-**Plugin ID**: `com.clives.indigoplugin.sensormonitor`
+**Platform**: Indigo 2022.1 or later / macOS / Python 3.10+
+
+*Developed and tested on Indigo 2025.2 / Python 3.13. Older Indigo releases that meet the minimum API version above should also work — the API floor is what Indigo's plugin loader actually checks.*
+**Plugin ID**: `com.clives.indigoplugin.deviceactivitymonitor`
+**GitHub**: <https://github.com/Highsteads/DeviceActivityMonitor>
+
+> v1.9.0 renamed this plugin from **Sensor Monitor** → **Device Activity Monitor**.
+> Same lineage; the new name better describes both halves of what it now does:
+> per-device change **logging** and group-change custom **triggers**.
 
 ---
 
-## Overview
+## Table of contents
 
-Sensor Monitor is an Indigo plugin that watches for state changes across a configured list of
-sensors and logs them to the Indigo event log with millisecond-precision timestamps.
-
-Instead of creating individual Indigo triggers and separate Python scripts for each sensor,
-this plugin handles all sensor logging from a single configuration. Device names are always
-read live from Indigo, so renaming a device is instantly reflected in logs with no code
-changes required.
+- [What it does](#what-it-does)
+- [Installation](#installation)
+- [Credentials — `IndigoSecrets.py` vs `IndigoSecrets_example.py`](#credentials--indigosecretspy-vs-indigosecrets_examplepy)
+- [Quick start in 5 minutes](#quick-start-in-5-minutes)
+- [Use cases](#use-cases)
+  - [1. Activity logging — passive observer](#1-activity-logging--passive-observer)
+  - [2. Single-device direction trigger](#2-single-device-direction-trigger)
+  - [3. Multi-sensor "any change" trigger](#3-multi-sensor-any-change-trigger)
+  - [4. Multi-sensor "becomes occupied" trigger](#4-multi-sensor-becomes-occupied-trigger)
+  - [5. Multi-sensor "becomes empty" trigger](#5-multi-sensor-becomes-empty-trigger)
+  - [6. Save which device fired](#6-save-which-device-fired)
+  - [7. Combining with conditions and scripts](#7-combining-with-conditions-and-scripts)
+  - [8. Variable monitoring](#8-variable-monitoring)
+- [Multi-Sensor Trigger — deep dive](#multi-sensor-trigger--deep-dive)
+- [Configuration file](#configuration-file)
+- [Plugin menu](#plugin-menu)
+- [Discovery](#discovery)
+- [Log output examples](#log-output-examples)
+- [Group device states](#group-device-states)
+- [Repository structure](#repository-structure)
+- [Migrating from "Sensor Monitor"](#migrating-from-sensor-monitor)
+- [Changelog](#changelog)
+- [License](#license)
 
 ---
 
-## Features
+## What it does
 
-- Monitors any number of sensors from a single JSON config file
-- Supports multiple states per device (e.g. FP300 with both PIR and mmWave presence)
-- Custom ON/OFF labels per state (e.g. OPEN/CLOSED for door contacts)
-- Millisecond-precision timestamps in all log entries
-- **JSON config file** — edit outside the plugin, comment out entries with `#`, no Python needed
-- **Plugin menu** — Discover Devices, Find Contact Sensors, and Reload Config via Plugins > Sensor Monitor
-- **Discovery script** — scans all Indigo devices and generates a ready-to-use config file
-- **Variable monitoring** — logs Indigo variable value changes with `old -> new` format
-- **Startup validation** — warns about any configured device IDs not found in Indigo
-- **Rename detection** — logs when a monitored device or variable is renamed in Indigo
-- **Deletion warning** — warns when a monitored device or variable is deleted from Indigo
+Device Activity Monitor watches Indigo devices and variables and reacts to their state
+changes two complementary ways:
 
----
+1. **Logs** changes to the Indigo event log with millisecond-precision timestamps and
+   custom on/off labels (`Front Door OPEN`, `Lux Level: 450 -> 520`).
+2. **Fires custom triggers** when any device in a named **Group** changes state, with
+   an optional direction filter (`any change` / `becomes ON/OPEN` / `becomes OFF/CLOSED`).
 
-## Sensors Currently Monitored
+Groups are first-class Indigo devices managed via a rich two-list Add/Remove ConfigUI —
+no JSON editing required. The plugin replaces both:
 
-The plugin monitors whichever devices and variables you configure — either in the JSON
-config file (`sensor_monitor_config.json`) or in the fallback Python dicts inside `plugin.py`.
-The example configuration covers occupancy sensors, mmWave presence sensors, and a door
-contact sensor, but you can monitor any Indigo device state.
+- A pile of one-trigger-per-device "Device State Changed" triggers
+- The older **Group Change Listener** plugin (Morris's) with its painful
+  Cmd-click-everything multi-select
 
-See [Configuration File](#configuration-file) and [Adding a New Sensor](#adding-a-new-sensor)
-below for how to set up your own devices.
+…with one subscription, one config file for logging, and one Indigo Group device per
+trigger group.
 
 ---
 
 ## Installation
 
-1. Double-click `Sensor_Monitor.indigoPlugin` — Indigo will prompt to install it
-2. Go to **Plugins > Manage Plugins** in Indigo
-3. Enable **Sensor Monitor**
-4. Check the Indigo event log — you will see startup validation output confirming
-   which devices were found
+1. Download `Device_Activity_Monitor.indigoPlugin.zip` from the
+   [latest release](https://github.com/Highsteads/DeviceActivityMonitor/releases)
+2. Unzip and double-click `Device_Activity_Monitor.indigoPlugin` — Indigo will
+   prompt to install
+3. **Plugins → Manage Plugins** → enable **Device Activity Monitor**
+4. The plugin auto-creates its config folder at
+   `<install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/`
+5. Open the Indigo Event Log — you should see the startup banner and the loaded
+   device count
 
 ---
 
-## Configuration File
+## Credentials — `IndigoSecrets.py` vs `IndigoSecrets_example.py`
 
-From v1.3.0, the plugin reads its device and variable lists from a JSON config file
-instead of requiring edits to `plugin.py`.
+This plugin (along with all CliveS Indigo plugins) reads sensitive values from
+a shared master credentials file at:
 
-**File location**: `~/Documents/Indigo/SensorMonitor/sensor_monitor_config.json`
+`/Library/Application Support/Perceptive Automation/IndigoSecrets.py`
 
-If the file does not exist, the plugin falls back to the hardcoded `DEVICE_MONITOR` and
-`VARIABLE_MONITOR` dicts in `plugin.py`.
+| File | Purpose | Real data? | Committed to GitHub? |
+|------|---------|------------|----------------------|
+| `IndigoSecrets.py` | Working file the plugin reads at runtime. Keep a backup in a password manager. | YES | **NO** — listed in `.gitignore` |
+| `IndigoSecrets_example.py` | Template only — empty placeholders. Shipped in the plugin bundle. | NO | YES |
 
-### Generating the config file
+If you do not have `IndigoSecrets.py`, copy `IndigoSecrets_example.py` from
+the plugin bundle to that location and fill in your values. Or skip
+`IndigoSecrets.py` entirely and enter values via the plugin's configuration
+dialog — `IndigoSecrets.py` wins over the dialog when both are set.
 
-Run `discover_devices.py` once from the Indigo Script Editor:
+If a required value is set in NEITHER source the plugin logs an ERROR
+pointing the user to either fill in the matching field or add the key to
+`IndigoSecrets.py`.
 
-1. Open **Indigo > Scripts > New Script**
-2. Paste the contents of `discover_devices.py` into the editor
-3. Click **Run**
-4. Open `sensor_monitor_config.json` — contact sensor candidates are active, all others
-   are commented out for reference
-5. Edit the file as needed (see below)
-6. Reload the plugin: **Plugins > Sensor Monitor > Reload Plugin**
+**Note for this plugin specifically**: Device Activity Monitor reads no external
+APIs and needs no credentials in normal use. The `IndigoSecrets_example.py`
+file is shipped for ecosystem consistency only — there is nothing to fill in
+unless you extend the plugin yourself.
 
-### Config file format
+---
+
+## Quick start in 5 minutes
+
+**Goal**: get a Pushover notification when *any* of three motion sensors in
+the living room detects movement.
+
+1. **Create the group device**
+   - **Devices → New Device**
+   - Type = "Device Activity Monitor → Device Activity Monitor Group"
+   - Name it "Living Room Presence"
+   - **Show devices from**: pick `Living Room` (or `(All folders)`)
+   - In **Available devices**: ⌘-click your 3 motion sensors
+   - Click **Add to Group ↓**
+   - Save
+
+2. **Create the trigger**
+   - **New Trigger** → Type = "Device Activity Monitor: Group Changed"
+   - **Group**: pick "Living Room Presence  (3 members)"
+   - **Fire on**: "Any device becomes ON / OPEN / detected"
+   - **Actions tab**: add your Pushover action
+
+3. **Done**. Wave at any of the three sensors — Pushover fires. The trigger
+   does NOT re-fire while the sensor stays active, and does NOT fire on the
+   off transition (because of the direction filter).
+
+That's the headline workflow. The rest of this README covers the variants.
+
+---
+
+## Use cases
+
+### 1. Activity logging — passive observer
+
+You want a single log line every time a sensor changes state, so the event log
+becomes a usable timeline. No triggers, no actions — just clean logging.
+
+1. **Plugins → Device Activity Monitor → Discover All Devices**
+2. Open `device_activity_monitor_config.json` and uncomment / add the lines
+   you want logged
+3. **Plugins → Device Activity Monitor → Reload Config File**
+
+Each configured state gets a log line of the form:
+
+    [14:23:01.452] Front Door Contact OPEN
+    [14:25:33.104] Hall PIR Occupancy ON
+
+### 2. Single-device direction trigger
+
+Indigo has a built-in "Device State Changed" trigger for this, but if you'd
+rather pick by a friendly name from a list of Group devices:
+
+1. Create a group with one member (the device)
+2. Trigger → Fire on = "Any device becomes ON / OPEN / detected" (or the OFF variant)
+
+Useful when you want a consistent "group" mental model across single and
+multi-device cases.
+
+### 3. Multi-sensor "any change" trigger
+
+Fire whenever any member of the group changes any state. Equivalent to
+Morris's Group Change Listener with no filter.
+
+- Group: any number of devices
+- Trigger → Fire on = "Any change (default)"
+
+Use this for log-spam-style "something happened in this area" reactions where
+direction doesn't matter.
+
+### 4. Multi-sensor "becomes occupied" trigger
+
+Fire once when the *first* member transitions from off to on. Doesn't re-fire
+while any other member is also active.
+
+- Group: 3 presence sensors in a room
+- Trigger → Fire on = "Any device becomes ON / OPEN / detected"
+
+Common uses:
+- Turn on the lights when *anyone* enters a multi-sensor room
+- Pushover "movement in the garage" without 3 separate triggers
+- Start a "room occupied" timer
+
+### 5. Multi-sensor "becomes empty" trigger
+
+Fire only on the off transition.
+
+- Group: same room sensors
+- Trigger → Fire on = "Any device becomes OFF / CLOSED / clear"
+
+Common uses:
+- Start a delay timer to turn lights off when the last sensor clears
+- Trigger an "armed away" routine when a contact closes
+
+> Pairing: use one group with two triggers — one direction-filtered to
+> "becomes ON" and one to "becomes OFF". Each fires only on the relevant
+> edge.
+
+### 6. Save which device fired
+
+If multiple devices in a group could be the source, capture the firing
+device's name to an Indigo variable so your actions can use it:
+
+1. Trigger ConfigUI → tick **Save firing device**
+2. Pick a variable
+3. **Save value**: "Device Name" or "Device ID"
+4. In your action, reference the variable with `%%v:NN%%` or read it in a
+   Python action script
+
+Examples:
+- Pushover body: "Movement detected by %%v:firing_sensor%%"
+- Script: branch based on which front-of-house contact was triggered
+
+### 7. Combining with conditions and scripts
+
+The trigger doesn't have to fire blindly. Indigo's standard Conditions and
+Actions tabs are fully available:
+
+- **Conditions tab**: "only fire between sunset and sunrise" / "only when
+  the alarm is armed" / "only when nobody is home"
+- **Actions tab**: chain to action groups, Python scripts, action collections,
+  send-to-variables, control pages, etc.
+
+For complex multi-room logic, fire one trigger from each group and have the
+target action group read all the various states it cares about.
+
+### 8. Variable monitoring
+
+Add Indigo variables to the `variables[]` section of
+`device_activity_monitor_config.json`:
+
+    "variables": [
+      {"id": 241032502, "name": "Lux_Level", "label": "Lux Level"}
+    ]
+
+Output:
+
+    [14:26:10.512] Lux Level: 450 -> 520
+
+---
+
+## Multi-Sensor Trigger — deep dive
+
+The headline feature. This section walks through every option in detail.
+
+### Step 1: create the Group device
+
+**Devices → New Device** → Type = "Device Activity Monitor → Device Activity
+Monitor Group".
+
+You get a dialog with these fields:
+
+| Field | What it does |
+|-------|--------------|
+| **Show devices from** | Folder filter for the Available list. `(All folders)` shows everything; `(Root)` shows un-foldered devices; named folders narrow to that folder's contents |
+| **Available devices** | Multi-select list of devices NOT yet in this group. Cmd-click to select multiple, then click Add. Refreshes as the folder filter changes |
+| **Add to Group ↓** | Moves the Available-list selection into the Members list |
+| **Current group members** | Multi-select list of devices currently in the group. Devices the bridge has since deleted show as `<missing device id NN>` so you can clean them up |
+| **↑ Remove from Group** | Moves the Members-list selection back to "available" |
+
+To **edit** a group later, double-click the Group device — same dialog, same
+flow. There is no JSON editing.
+
+To **delete** a group, right-click → Delete (standard Indigo flow). Any
+triggers wired to the deleted group will log a warning on next plugin reload
+that they reference a now-missing group.
+
+Each Group device shows `N members` as its display state in the Indigo device
+list.
+
+### Step 2: create the Trigger
+
+**New Trigger** → Type = "Device Activity Monitor: Group Changed".
+
+| Field | What it does |
+|-------|--------------|
+| **Group** | Dropdown of all Group devices, each labelled with its name and live member count. This is Indigo's native device picker filtered to `self.damGroup` — folder tree, search, the lot |
+| **Fire on** | Direction filter (see next section) |
+| **Save firing device** | Tick to capture which member triggered the event into an Indigo variable |
+| **Save to variable** | (only when Save firing device is ticked) target variable |
+| **Save value** | (only when Save firing device is ticked) "Device Name" or "Device ID" |
+
+### Step 3: pick the direction filter
+
+The **Fire on** menu has three options. They look at the device's `onState`
+attribute before and after the change.
+
+| Option | Fires when… |
+|--------|-------------|
+| **Any change** (default) | *Any* state on a group member changes — including non-onState states like temperature readings or battery level. Use sparingly with chatty sensors |
+| **Any device becomes ON / OPEN / detected** | A member's `onState` flips from `False` to `True`. Edge-triggered: doesn't re-fire while it stays on. Use for occupancy, door-opens, alarms |
+| **Any device becomes OFF / CLOSED / clear** | A member's `onState` flips from `True` to `False`. Edge-triggered: doesn't re-fire while it stays off. Use for "last sensor cleared" timers, door closes |
+
+The directional options only fire on `onState` transitions, so they ignore
+chatty value updates (temperature, illuminance, etc.) entirely.
+
+### Step 4: chain to actions
+
+Standard Indigo Actions tab. The trigger fires the same way as any built-in
+Indigo trigger — Pushover, action groups, scripts, control pages all work
+identically.
+
+If you ticked **Save firing device**, your variable now contains the name or
+ID of the device that triggered the firing — reference it via `%%v:NN%%` in
+text fields, or read it directly in Python script actions.
+
+### Diagnostic states on the Group device
+
+Whenever a trigger fires for a Group device, the plugin also writes these
+states on the Group device itself (useful for control pages or other
+triggers):
+
+- `memberCount` — number of devices in the group
+- `lastFiringDevice` — name of the device that triggered the most recent fire
+- `lastFiringTime` — `YYYY-MM-DD HH:MM:SS`
+- `lastFiringDirection` — `activated` / `deactivated` / `changed`
+- `status` — display string, e.g. "3 members"
+
+---
+
+## Configuration file
+
+Lives at:
+
+    <install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/
+    ├── device_activity_monitor_config.json   ← edit this
+    └── device_discovery.json                 ← generated by Discover Devices
+
+`<install>` resolves via `indigo.server.getInstallFolderPath()` so the path
+follows your active Indigo version automatically.
+
+### Format
 
 ```json
 {
+  "_usage": "Lines starting with # are ignored. Reload plugin after changes.",
+  "excluded_ids": [],
   "devices": [
-    {"id": 123456789, "name": "Front Door",  "state": "onState",  "label": "Front Door",  "on_text": "OPEN", "off_text": "CLOSED"},
-    {"id": 987654321, "name": "Lounge PIR",  "state": "onState",  "label": "Occupancy"},
-    {"id": 111222333, "name": "Basin mmWave","state": "pirDetection", "label": "PIR"},
-    {"id": 111222333, "name": "Basin mmWave","state": "presence",     "label": "mmWave Presence"},
-# {"id": 444555666, "name": "Disabled Sensor", "state": "onState", "label": "Test"}
+    {"id": 123456789, "name": "Front Door",  "state": "onState", "label": "Front Door",  "on_text": "OPEN", "off_text": "CLOSED"},
+    {"id": 987654321, "name": "Basin mmWave","state": "pirDetection", "label": "PIR"},
+    {"id": 987654321, "name": "Basin mmWave","state": "presence",     "label": "mmWave Presence"}
   ],
   "variables": [
     {"id": 241032502, "name": "Lux_Level", "label": "Lux Level"}
@@ -96,96 +351,74 @@ Run `discover_devices.py` once from the Indigo Script Editor:
 }
 ```
 
-**Key points:**
+### Conventions
 
-- Any line whose first non-whitespace character is `#` is ignored — use this to disable
-  an entry without deleting it
-- Trailing commas before `]` or `}` are allowed (the plugin cleans them up automatically)
-- Multiple rows with the same `id` are grouped — this is how you monitor multiple states
-  on a single device (see Basin mmWave example above)
-- `name` is for your reference only; `label` is what appears in the Indigo event log
-- `on_text` / `off_text` are optional (default: `ON` / `OFF`)
+- `#` at the start of a line disables that entry. Use this to comment out a
+  device without deleting the line
+- Trailing commas before `]` or `}` are silently cleaned up
+- Multiple rows with the same `id` monitor multiple states on one device
+  (e.g. PIR and mmWave on a multi-state sensor)
+- After saving, reload via **Plugins → Device Activity Monitor → Reload
+  Config File** — no plugin restart required
 
-### Config field reference
+### Field reference
 
-| Field      | Required | Description                                                        |
-|------------|----------|--------------------------------------------------------------------|
-| `id`       | Yes      | Indigo device or variable ID (integer)                             |
-| `name`     | No       | Human-readable device name for your reference                      |
-| `state`    | Yes (devices) | `"onState"` uses `device.onState`; any other name reads from `device.states` |
-| `label`    | No       | Text shown in the log after the device name (defaults to `name`)   |
-| `on_text`  | No       | Log text when state is True (default: `"ON"`)                      |
-| `off_text` | No       | Log text when state is False (default: `"OFF"`)                    |
+| Field      | Required | Description                                                                  |
+|------------|----------|------------------------------------------------------------------------------|
+| `id`       | Yes      | Indigo device or variable ID (integer)                                       |
+| `name`     | No       | For your reference only — never used by the code                             |
+| `state`    | Yes      | `"onState"` reads `device.onState`; any other name reads from `device.states`|
+| `label`    | No       | Log text shown after the device name (defaults to `name`)                    |
+| `on_text`  | No       | Log text when state is True (default `ON`)                                   |
+| `off_text` | No       | Log text when state is False (default `OFF`)                                 |
 
-After saving changes, reload: **Plugins > Sensor Monitor > Reload Plugin**
+### Groups are NOT in this file
 
----
-
-## Adding a New Sensor
-
-### Via the config file (recommended)
-
-Add a line to the `"devices"` section of `sensor_monitor_config.json`:
-
-```json
-{"id": 123456789, "name": "Hall PIR", "state": "onState", "label": "Occupancy"},
-```
-
-Find the device ID in Indigo by right-clicking the device and choosing
-**Copy Device ID to Clipboard** (or check the device's Info tab).
-
-### Via plugin.py (fallback only)
-
-If you are not using a config file, edit `DEVICE_MONITOR` in `plugin.py`:
-
-```python
-DEVICE_MONITOR = {
-    # existing entries ...
-
-    123456789: [{"state": "onState", "label": "Occupancy"}],
-}
-```
-
-### Multiple states per device (config file)
-
-Add two rows with the same `id`:
-
-```json
-{"id": 123456789, "state": "pirDetection", "label": "PIR"},
-{"id": 123456789, "state": "presence",     "label": "mmWave Presence"},
-```
-
-### Multiple states per device (plugin.py)
-
-```python
-123456789: [{"state": "pirDetection", "label": "PIR"},
-            {"state": "presence",     "label": "mmWave Presence"}],
-```
-
-### Custom ON/OFF labels
-
-```json
-{"id": 123456789, "state": "onState", "label": "Front Door", "on_text": "OPEN", "off_text": "CLOSED"},
-```
+As of v1.8.0, groups live as `damGroup` Indigo devices, not in the JSON file.
+This file is logging-only.
 
 ---
 
-## Adding a Variable to Monitor
+## Plugin menu
 
-Add a line to the `"variables"` section of `sensor_monitor_config.json`:
+Under **Plugins → Device Activity Monitor**:
 
-```json
-{"id": 241032502, "name": "Lux_Level", "label": "Lux Level"},
-```
-
-Variable IDs can be found by right-clicking the variable in Indigo and choosing
-**Copy Variable ID to Clipboard**.
-
-Log output: `[14:23:01.452] Lux Level: 450 -> 520`
+| Item | What it does |
+|------|--------------|
+| **Discover All Devices (generate config file)** | Scans every Indigo device, classifies contact / motion / presence candidates using device type, Zigbee2MQTT capability flags, and name keywords. Writes `device_discovery.json` (full inventory) and a fresh `device_activity_monitor_config.json` (sensor candidates active, all others commented out for reference). Preserves `excluded_ids` across re-runs |
+| **Find Contact & Motion Sensors** | One-shot log dump of all sensor candidates with ready-to-paste config entries — useful for a quick check without regenerating the whole config |
+| **Reload Config File** | Re-reads the JSON and re-validates without a full plugin restart. Use after editing the config file by hand |
+| **Show Plugin Info** | Prints the startup banner on demand |
 
 ---
 
-## Log Output Examples
+## Discovery
+
+Discovery uses a layered classifier that gets the right answer even on
+generic Zigbee2MQTT devices that publish stub fields they don't physically
+have:
+
+1. **Z2M ownerProps** (authoritative when available): `has_contact`,
+   `has_occupancy`, `has_presence`, `has_pir`
+2. **deviceTypeId hints**: `z2mContactSensor` → contact, `z2mOccupancySensor`
+   → motion
+3. **Motion-keyword veto**: if the device name contains `motion`, `pir`,
+   `presence`, `occupancy`, `mmwave`, `radar`, it can't be a contact sensor
+4. **State-name match**: `contact` / `doorSensor` / `windowSensor` → contact;
+   `occupancy` / `pirDetection` / `presence` / `motion` / `motionDetected`
+   → motion
+5. **Name-keyword match**: `contact`, `door`, `window`, etc.
+
+To **permanently exclude** a device from discovery output, add its ID to the
+`excluded_ids` array in the config file. Subsequent re-discovery runs will
+respect the exclusion and leave that device commented out.
+
+To **add a sensor that discovery missed**, just add a line manually to
+`devices[]` — discovery never deletes manually-added entries.
+
+---
+
+## Log output examples
 
 ```
 [14:23:01.452] Hall PIR Occupancy ON
@@ -193,116 +426,89 @@ Log output: `[14:23:01.452] Lux Level: 450 -> 520`
 [14:25:33.104] Front Door Contact OPEN
 [14:25:41.230] Front Door Contact CLOSED
 [14:26:10.512] Lux Level: 450 -> 520
-[14:30:00.001] [Sensor Monitor] Device renamed: 'Test Sensor' -> 'Hall PIR' (ID: 99887766)
-[14:31:05.774] [Sensor Monitor] WARNING - Monitored device deleted: 'Hall PIR' (ID: 99887766) - remove from config file or DEVICE_MONITOR in plugin.py
+[14:30:00.001] [Device Activity Monitor] Device renamed: 'Test Sensor' -> 'Hall PIR' (ID: 99887766)
+[14:31:05.774] [Device Activity Monitor] WARNING - Monitored device deleted: 'Hall PIR' (ID: 99887766)
 ```
 
 ---
 
-## Startup Validation Output
+## Group device states
 
-On every plugin start or reload, all configured devices and variables are validated:
+Each `damGroup` device exposes:
+
+| State                  | Type    | Updated when                                |
+|------------------------|---------|---------------------------------------------|
+| `memberCount`          | Integer | Group device is saved / reloaded            |
+| `status`               | String  | Display state — e.g. `"3 members"`         |
+| `lastFiringDevice`     | String  | A trigger wired to this group fires        |
+| `lastFiringTime`       | String  | `YYYY-MM-DD HH:MM:SS` of last fire          |
+| `lastFiringDirection`  | String  | `activated` / `deactivated` / `changed`     |
+
+Useful for control pages ("Living Room presence last activity: 2 minutes
+ago") or for chaining one group's activity into another trigger's condition.
+
+---
+
+## Repository structure
 
 ```
-[Sensor Monitor] Config loaded from: /Users/.../sensor_monitor_config.json (10 devices, 1 variables)
-[Sensor Monitor] Device validation - 10 found, 0 missing:
-  [OK] Front Door Contact (ID: 123456789)
-  ...
-[Sensor Monitor] All monitored devices validated OK
-[Sensor Monitor] Variable validation - 1 found, 0 missing:
-  [OK] Lux_Level (ID: 241032502)
-[Sensor Monitor] All monitored variables validated OK
-```
-
-If a device ID is not found:
-```
-  [!]  ID 999999999 - not found in Indigo
-[Sensor Monitor] 1 monitored device(s) not found - check IDs in config file or DEVICE_MONITOR in plugin.py
+README.md                                                  ← this file (GitHub displays this)
+Device_Activity_Monitor.indigoPlugin/
+├── Contents/
+│   ├── Info.plist
+│   └── Server Plugin/
+│       ├── plugin.py                       ← main plugin code + ConfigUI callbacks
+│       ├── Devices.xml                     ← damGroup device type
+│       ├── Events.xml                      ← Group Changed trigger
+│       ├── MenuItems.xml                   ← Plugins menu
+│       ├── plugin_utils.py                 ← startup banner helper
+│       ├── discover_devices.py             ← standalone Script Editor discovery
+│       ├── find_contact_sensors.py         ← standalone Script Editor sensor finder
+│       ├── test_plugin.py                  ← 86 tests, runs without Indigo
+│       └── IndigoSecrets_example.py        ← credential template (unused — ecosystem standard)
 ```
 
 ---
 
-## Migrating from Triggers and Scripts
+## Migrating from "Sensor Monitor"
 
-If you currently monitor sensors using individual Indigo triggers or standalone Python
-scripts, this plugin replaces all of them with a single subscription.
+If you ever installed a pre-v1.9.0 release of this plugin under the old name:
 
-Once the plugin is confirmed working:
+1. Disable **Sensor Monitor** in Indigo Manage Plugins
+2. Delete the old bundle at `<install>/Plugins/Sensor_Monitor.indigoPlugin/`
+3. Install Device Activity Monitor v1.9.0
+4. Move `<install>/Preferences/Plugins/com.clives.indigoplugin.sensormonitor/` →
+   `<install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/`
+5. Rename `sensor_monitor_config.json` → `device_activity_monitor_config.json`
+   inside that folder
+6. Old `smGroup` devices are not auto-migrated to `damGroup` — re-create
+   groups via Devices → New Device
 
-- **Remove Indigo triggers** that fire on state changes for your monitored devices —
-  the plugin handles all logging for them directly
-- **Retire any per-sensor scripts** that log or react to individual device state changes —
-  add those devices to the config file instead
-
-The plugin processes every configured device from one callback, so there is no need to
-maintain separate triggers or scripts per sensor.
-
----
-
-## Plugin Menu
-
-The following items are available under **Plugins > Sensor Monitor**:
-
-| Menu item | What it does |
-|-----------|--------------|
-| **Discover All Devices (generate config file)** | Scans every Indigo device, writes `device_discovery.json` (full inventory) and a fresh `sensor_monitor_config.json` (contact candidates active, all others commented out). Identical to running `discover_devices.py` in the Script Editor but runs from the menu with one click. |
-| **Find Contact Sensors** | Logs all contact/door/window sensor candidates to the Indigo event log with their ready-to-paste config entries. Useful for a quick check without regenerating the full config file. |
-| *(separator)* | |
-| **Reload Config File** | Re-reads `sensor_monitor_config.json` and re-validates all devices and variables — without a full plugin restart. Use this after editing the config file. |
-
----
-
-## File Structure
-
-```
-Sensor_Monitor.indigoPlugin/
-├── README.md
-└── Contents/
-    ├── Info.plist
-    └── Server Plugin/
-        ├── plugin.py              # Main plugin code — also contains all menu callbacks
-        ├── MenuItems.xml          # Defines the Plugins > Sensor Monitor menu items
-        ├── discover_devices.py    # Standalone Script Editor version of Discover Devices
-        ├── find_contact_sensors.py # Standalone Script Editor version of Find Contact Sensors
-        └── test_plugin.py         # Mock test suite — run with: python3 test_plugin.py -v
-```
-
-**Config file** (generated by `discover_devices.py`, lives outside the plugin bundle):
-```
-~/Documents/Indigo/SensorMonitor/
-├── sensor_monitor_config.json   # Edit this to add/remove/disable devices
-└── device_discovery.json        # Full device inventory from last discovery run
-```
-
-`test_plugin.py` is ignored by Indigo at runtime. Run it from Terminal to verify the
-plugin logic outside of the Indigo runtime environment.
+(For me specifically: that migration was done at the moment of the rename, so
+this section exists only for completeness if I ever do a clean reinstall.)
 
 ---
 
 ## Changelog
 
-| Version | Date       | Change |
-|---------|------------|--------|
-| 1.5.0   | 2026-02-27 | Motion sensor discovery — Find Contact & Motion Sensors menu item, _MOTION_STATE_NAMES/_MOTION_NAME_KEYWORDS constants, _disc_is_motion() / _disc_motion_states() / _disc_motion_entry() helpers; Discover All Devices now produces three sections: Contact, Motion, Other |
-| 1.4.1   | 2026-02-27 | Discovery filter fix — exclude ThermostatDevice and plain Device types from contact candidate matching; use getattr for onState reads in deviceUpdated() |
-| 1.4.0   | 2026-02-27 | Plugin menu — Discover All Devices, Find Contact Sensors, Reload Config File (MenuItems.xml + menu callbacks in plugin.py) |
-| 1.3.0   | 2026-02-27 | JSON config file support — sensor_monitor_config.json with # comment lines, discover_devices.py generates ready-to-use config |
-| 1.2.0   | 2026-02-27 | Variable monitoring — VARIABLE_MONITOR dict, variableUpdated(), variableDeleted() |
-| 1.1.0   | 2026-02-27 | Startup device validation, rename detection, deviceDeleted() warning, mock test suite |
-| 1.0.0   | 2026-02-27 | Initial release — subscribeToChanges, multi-state per device, custom on/off labels |
+| Version | Date | Change |
+|---------|------|--------|
+| 1.9.0   | 2026-05-12 | **Renamed** Sensor Monitor → Device Activity Monitor (bundle ID, device type id, event id, config filename all changed; legacy migration code stripped) |
+| 1.8.1   | 2026-05-12 | Dropped JSON-groups backward-compat path; damGroup devices the sole source of truth |
+| 1.8.0   | 2026-05-12 | Groups are now first-class Indigo devices with Add/Remove ConfigUI |
+| 1.7.2   | 2026-05-12 | Direction filter (any/activated/deactivated) on group triggers |
+| 1.7.1   | 2026-05-11 | Moved config files from `Logs/` to `Preferences/` |
+| 1.7.0   | 2026-05-11 | Group-change custom triggers (JSON-defined, since superseded by damGroup devices) |
+| 1.6.0   | 2026-05-11 | Z2M-aware sensor classifier (uses ownerProps `has_*` flags) |
+| 1.5.9   | 2026-02-27 | Sync live plugin (multiple features since v1.4.0) |
+| 1.4.0   | 2026-02-27 | Plugin menu — Discover Devices, Find Contact Sensors, Reload Config File |
+| 1.3.0   | 2026-02-27 | JSON config file support |
+| 1.2.0   | 2026-02-27 | Variable monitoring |
+| 1.1.0   | 2026-02-27 | Startup validation, rename detection, deletion warning |
+| 1.0.0   | 2026-02-27 | Initial release |
 
 ---
 
-## How It Works
+## License
 
-1. On `startup()`, the plugin calls `indigo.devices.subscribeToChanges()` and
-   `indigo.variables.subscribeToChanges()` to receive callbacks for every change
-2. `_load_config()` reads `sensor_monitor_config.json` (if it exists) and builds
-   `self.device_monitor` and `self.variable_monitor`; falls back to the hardcoded
-   Python dicts if no file is found
-3. `deviceUpdated(origDev, newDev)` fires for every change — the plugin checks if the
-   device ID is in `self.device_monitor` and ignores everything else
-4. For each configured state, it compares old vs new value and only logs if it changed
-5. `variableUpdated(origVar, newVar)` logs value changes in `old -> new` format
-6. `deviceDeleted(dev)` and `variableDeleted(var)` warn when a monitored item is removed
-7. Device names come from `newDev.name` (live from Indigo) — never hardcoded
+GPL-3.0 — see plugin source files for details.
