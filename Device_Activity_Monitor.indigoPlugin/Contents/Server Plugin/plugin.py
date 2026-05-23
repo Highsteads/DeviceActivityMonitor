@@ -2,9 +2,25 @@
 # -*- coding: utf-8 -*-
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
-# Author:      CliveS & Claude Sonnet 4.6
-# Date:        14-05-2026
-# Version:     1.9.4
+# Author:      CliveS & Claude Opus 4.7
+# Date:        23-05-2026
+# Version:     1.9.5
+#
+# v1.9.5 (23-05-2026):
+# - Three new menu items to toggle plugin behaviour at runtime, no restart
+#   needed:
+#     * Toggle Device Change Log (on/off)      — gates per-device/variable
+#       event-log lines (deviceUpdated, deviceDeleted, variableUpdated,
+#       variableDeleted)
+#     * Toggle Group Change Triggers (on/off)  — gates damGroup-driven
+#       custom-event firing in deviceUpdated
+#     * Toggle Timestamps in Log (on/off)      — strips/restores the
+#       [HH:MM:SS.mmm] prefix on every plugin log line via the new _ts()
+#       helper
+# - All three flags persist in pluginPrefs (logEnabled, groupEnabled,
+#   timestampEnabled) and default ON so existing installs are unchanged.
+# - Startup banner and Show Plugin Info now report the current state of
+#   all three flags via the extras= mechanism in plugin_utils.
 #
 # v1.9.4 (14-05-2026):
 # - Discovery now correctly classifies multi-capability Aqara presence
@@ -359,6 +375,12 @@ class Plugin(indigo.PluginBase):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
         self.debug = pluginPrefs.get("showDebugInfo", False)
 
+        # Runtime toggles (v1.9.5) — flipped via menu items, persisted in pluginPrefs.
+        # All default ON so existing installs behave identically after upgrade.
+        self.log_enabled       = bool(pluginPrefs.get("logEnabled",       True))
+        self.group_enabled     = bool(pluginPrefs.get("groupEnabled",     True))
+        self.timestamp_enabled = bool(pluginPrefs.get("timestampEnabled", True))
+
         # Group-change machinery. damGroup devices are the only source of
         # truth (v1.8.1+). _rebuild_group_index() recomputes group_members
         # from device_groups whenever it changes.
@@ -373,6 +395,15 @@ class Plugin(indigo.PluginBase):
         else:
             indigo.server.log(f"{pluginDisplayName} v{pluginVersion} starting")
 
+    # ----- timestamp helper -----
+    def _ts(self):
+        """Return '[HH:MM:SS.mmm] ' when timestamps are enabled, else ''.
+        Plugin log lines prepend this so flipping the timestamp toggle
+        changes every log line consistently."""
+        if not self.timestamp_enabled:
+            return ""
+        return f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] "
+
     def startup(self):
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
@@ -380,6 +411,12 @@ class Plugin(indigo.PluginBase):
             f"Device Activity Monitor {self.pluginVersion} started - "
             f"monitoring {len(self.device_monitor)} devices, "
             f"{len(self.variable_monitor)} variables"
+        )
+        # Report runtime toggle state once at startup (after the banner).
+        self.logger.info(
+            f"Toggles: DeviceChangeLog={'on' if self.log_enabled else 'off'}, "
+            f"GroupTriggers={'on' if self.group_enabled else 'off'}, "
+            f"Timestamps={'on' if self.timestamp_enabled else 'off'}"
         )
         self._validate_monitored_devices()
         self._validate_monitored_variables()
@@ -403,8 +440,8 @@ class Plugin(indigo.PluginBase):
         # a group without being in device_monitor, and vice-versa. Group
         # triggers fire on ANY state change OR onState transition; the
         # per-trigger "fireOn" filter (any / activated / deactivated) decides
-        # which transitions actually fire.
-        if newDev.id in self.group_members:
+        # which transitions actually fire. v1.9.5: gated by group_enabled flag.
+        if self.group_enabled and newDev.id in self.group_members:
             try:
                 states_changed = (newDev.states != origDev.states)
                 onstate_flip   = (
@@ -416,15 +453,17 @@ class Plugin(indigo.PluginBase):
             except Exception as exc:
                 self.logger.error(f"[Device Activity Monitor] group-trigger error: {exc}")
 
-        if newDev.id not in self.device_monitor:
+        # v1.9.5: gated by log_enabled flag.
+        if not self.log_enabled:
             return
 
-        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        if newDev.id not in self.device_monitor:
+            return
 
         # --- Name change detection ---
         if origDev.name != newDev.name:
             indigo.server.log(
-                f"[{timestamp}] [Device Activity Monitor] Device renamed: "
+                f"{self._ts()}[Device Activity Monitor] Device renamed: "
                 f"'{origDev.name}' -> '{newDev.name}' (ID: {newDev.id})"
             )
 
@@ -441,7 +480,7 @@ class Plugin(indigo.PluginBase):
                     new_val = newDev.states.get(state_name)
             except Exception as e:
                 self.logger.error(
-                    f"[{timestamp}] Error reading '{state_name}' "
+                    f"{self._ts()}Error reading '{state_name}' "
                     f"for {newDev.name}: {e}"
                 )
                 continue
@@ -475,10 +514,11 @@ class Plugin(indigo.PluginBase):
 
             # Suppress the label if it is identical to the device name to
             # avoid e.g. "Side Passage Motion Side Passage Motion OFF"
+            ts = self._ts()
             if label == newDev.name:
-                indigo.server.log(f"[{timestamp}] {newDev.name} {state_text}")
+                indigo.server.log(f"{ts}{newDev.name} {state_text}")
             else:
-                indigo.server.log(f"[{timestamp}] {newDev.name} {label} {state_text}")
+                indigo.server.log(f"{ts}{newDev.name} {label} {state_text}")
 
     # ======================================
     # DEVICE DELETED CALLBACK
@@ -487,12 +527,14 @@ class Plugin(indigo.PluginBase):
     def deviceDeleted(self, dev):
         super().deviceDeleted(dev)
 
+        if not self.log_enabled:
+            return
+
         if dev.id not in self.device_monitor:
             return
 
-        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
-            f"[{timestamp}] [Device Activity Monitor] WARNING - Monitored device deleted: "
+            f"{self._ts()}[Device Activity Monitor] WARNING - Monitored device deleted: "
             f"'{dev.name}' (ID: {dev.id}) - "
             f"remove from config file or DEVICE_MONITOR in plugin.py"
         )
@@ -504,15 +546,16 @@ class Plugin(indigo.PluginBase):
     def variableUpdated(self, origVar, newVar):
         super().variableUpdated(origVar, newVar)
 
-        if newVar.id not in self.variable_monitor:
+        if not self.log_enabled:
             return
 
-        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        if newVar.id not in self.variable_monitor:
+            return
 
         # --- Name change detection ---
         if origVar.name != newVar.name:
             indigo.server.log(
-                f"[{timestamp}] [Device Activity Monitor] Variable renamed: "
+                f"{self._ts()}[Device Activity Monitor] Variable renamed: "
                 f"'{origVar.name}' -> '{newVar.name}' (ID: {newVar.id})"
             )
 
@@ -524,7 +567,7 @@ class Plugin(indigo.PluginBase):
         label  = config.get("label", newVar.name)
 
         indigo.server.log(
-            f"[{timestamp}] {label}: {origVar.value} -> {newVar.value}"
+            f"{self._ts()}{label}: {origVar.value} -> {newVar.value}"
         )
 
     # ======================================
@@ -534,12 +577,14 @@ class Plugin(indigo.PluginBase):
     def variableDeleted(self, var):
         super().variableDeleted(var)
 
+        if not self.log_enabled:
+            return
+
         if var.id not in self.variable_monitor:
             return
 
-        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.warning(
-            f"[{timestamp}] [Device Activity Monitor] WARNING - Monitored variable deleted: "
+            f"{self._ts()}[Device Activity Monitor] WARNING - Monitored variable deleted: "
             f"'{var.name}' (ID: {var.id}) - "
             f"remove from config file or VARIABLE_MONITOR in plugin.py"
         )
@@ -1543,7 +1588,35 @@ class Plugin(indigo.PluginBase):
     # ======================================
 
     def showPluginInfo(self, valuesDict=None, typeId=None):
+        extras = [
+            ("Device Change Log:",     "ON" if self.log_enabled       else "OFF"),
+            ("Group Change Triggers:", "ON" if self.group_enabled     else "OFF"),
+            ("Timestamps in Log:",     "ON" if self.timestamp_enabled else "OFF"),
+        ]
         if log_startup_banner:
-            log_startup_banner(self.pluginId, self.pluginDisplayName, self.pluginVersion)
+            log_startup_banner(
+                self.pluginId, self.pluginDisplayName, self.pluginVersion,
+                extras=extras,
+            )
         else:
             indigo.server.log(f"{self.pluginDisplayName} v{self.pluginVersion}")
+            for label, value in extras:
+                indigo.server.log(f"  {label} {value}")
+
+    # ----- toggle helpers -----
+    def _set_flag(self, pref_key, attr_name, label):
+        """Flip a bool pluginPref, mirror it onto the instance attribute, persist."""
+        new_value = not getattr(self, attr_name)
+        setattr(self, attr_name, new_value)
+        self.pluginPrefs[pref_key] = new_value
+        state = "ON" if new_value else "OFF"
+        indigo.server.log(f"[Device Activity Monitor] {label} -> {state}")
+
+    def menuToggleDeviceChangeLog(self):
+        self._set_flag("logEnabled", "log_enabled", "Device Change Log")
+
+    def menuToggleGroupTriggers(self):
+        self._set_flag("groupEnabled", "group_enabled", "Group Change Triggers")
+
+    def menuToggleTimestamps(self):
+        self._set_flag("timestampEnabled", "timestamp_enabled", "Timestamps in Log")

@@ -388,7 +388,13 @@ Under **Plugins → Device Activity Monitor**:
 | **Discover All Devices (generate config file)** | Scans every Indigo device, classifies contact / motion / presence candidates using device type, Zigbee2MQTT capability flags, and name keywords. Writes `device_discovery.json` (full inventory) and a fresh `device_activity_monitor_config.json` (sensor candidates active, all others commented out for reference). Preserves `excluded_ids` across re-runs |
 | **Find Contact & Motion Sensors** | One-shot log dump of all sensor candidates with ready-to-paste config entries — useful for a quick check without regenerating the whole config |
 | **Reload Config File** | Re-reads the JSON and re-validates without a full plugin restart. Use after editing the config file by hand |
-| **Show Plugin Info** | Prints the startup banner on demand |
+| **Toggle Device Change Log (on/off)** | Flips per-device / per-variable event-log lines on or off. When OFF the plugin still subscribes to changes (group triggers keep working) but writes nothing to the event log |
+| **Toggle Group Change Triggers (on/off)** | Flips group-device-driven custom triggers on or off. When OFF, `damGroup` device changes no longer fire `damGroupChange` events even if matching triggers are enabled |
+| **Toggle Timestamps in Log (on/off)** | Strips or restores the `[HH:MM:SS.mmm]` prefix on every line the plugin writes to the event log. Indigo's own column timestamp is unaffected |
+| **Show Plugin Info** | Prints the startup banner on demand, including current state of the three toggles above |
+
+All three toggles persist across plugin restarts (stored in `pluginPrefs` as
+`logEnabled` / `groupEnabled` / `timestampEnabled`) and default ON.
 
 ---
 
