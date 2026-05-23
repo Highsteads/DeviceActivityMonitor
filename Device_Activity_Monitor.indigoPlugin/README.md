@@ -56,8 +56,8 @@ Groups are first-class Indigo devices managed via a rich two-list Add/Remove Con
 no JSON editing required. The plugin replaces both:
 
 - A pile of one-trigger-per-device "Device State Changed" triggers
-- The older **Group Change Listener** plugin (Morris's) with its painful
-  Cmd-click-everything multi-select
+- The older **Group Change Listener** plugin (Morris's) — this plugin is based on
+  Group Change Listener and updated to a dual-list Add/Remove ConfigUI
 
 …with one subscription, one config file for logging, and one Indigo Group device per
 trigger group.
