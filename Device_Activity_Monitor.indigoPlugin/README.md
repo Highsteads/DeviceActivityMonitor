@@ -52,6 +52,13 @@ changes two complementary ways:
 2. **Fires custom triggers** when any device in a named **Group** changes state, with
    an optional direction filter (`any change` / `becomes ON/OPEN` / `becomes OFF/CLOSED`).
 
+**The two halves are independent and can each be turned on or off at runtime** from the
+**Plugins → Device Activity Monitor** menu — use just the change-logger, just the group
+triggers, or both. The `[HH:MM:SS.mmm]` timestamp prefix on the logger's output is also
+its own toggle, so you can keep the logging on but rely on Indigo's column timestamp
+alone if the inline prefix is noise for you. All three toggles persist across plugin
+restarts. See [Plugin menu](#plugin-menu) below.
+
 Groups are first-class Indigo devices managed via a rich two-list Add/Remove ConfigUI —
 no JSON editing required. The plugin replaces both:
 
@@ -499,6 +506,11 @@ this section exists only for completeness if I ever do a clean reinstall.)
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.9.5   | 2026-05-23 | Three runtime toggle menu items — Device Change Log, Group Change Triggers, Timestamps in Log. Each is independent, persists across restarts, defaults ON |
+| 1.9.4   | 2026-05-14 | Discovery correctly classifies multi-capability Aqara presence sensors (PS-S04D, FP1 etc.) using `pirDetection` / `presenceDetectionOptions` state names |
+| 1.9.3   | 2026-05-13 | Added `on_value` / `off_value` config keys for explicit value matching on string-typed states (e.g. presenceEvent `enter`/`leave`) |
+| 1.9.2   | 2026-05-13 | Trust Z2M `has_*` flags to exclude non-motion devices in discovery |
+| 1.9.1   | 2026-05-12 | Minor discovery and config fixes |
 | 1.9.0   | 2026-05-12 | **Renamed** Sensor Monitor → Device Activity Monitor (bundle ID, device type id, event id, config filename all changed; legacy migration code stripped) |
 | 1.8.1   | 2026-05-12 | Dropped JSON-groups backward-compat path; damGroup devices the sole source of truth |
 | 1.8.0   | 2026-05-12 | Groups are now first-class Indigo devices with Add/Remove ConfigUI |
