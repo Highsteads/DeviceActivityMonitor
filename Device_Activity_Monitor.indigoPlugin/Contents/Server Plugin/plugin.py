@@ -4,7 +4,7 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.7
 # Date:        23-05-2026
-# Version:     1.9.5
+# Version:     1.9.6
 #
 # v1.9.5 (23-05-2026):
 # - Three new menu items to toggle plugin behaviour at runtime, no restart
@@ -726,6 +726,15 @@ class Plugin(indigo.PluginBase):
             return
         self.device_groups.pop(dev.id, None)
         self._rebuild_group_index()
+
+    @staticmethod
+    def didDeviceCommPropertyChange(oldDevice, newDevice):
+        """Restart comm only when the group membership list changes.
+
+        memberList is what the monitor watches; folderFilter is a UI-only
+        picker that doesn't affect runtime behaviour.
+        """
+        return oldDevice.pluginProps.get("memberList") != newDevice.pluginProps.get("memberList")
 
     def deviceDeleted(self, dev):
         super().deviceDeleted(dev)
