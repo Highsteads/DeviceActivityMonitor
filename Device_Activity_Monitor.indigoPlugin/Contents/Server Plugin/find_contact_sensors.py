@@ -23,7 +23,7 @@ import indigo
 from datetime import datetime
 
 def log(msg):
-    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}")
 
 # Keywords that suggest a contact/door/window sensor by device name
 CONTACT_KEYWORDS = [

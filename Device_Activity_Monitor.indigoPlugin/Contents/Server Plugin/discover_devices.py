@@ -100,7 +100,7 @@ NAME_EXCLUSION_KEYWORDS = {
 # ======================================
 
 def log(msg):
-    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+    indigo.server.log(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}")
 
 
 def get_folder_name(dev):

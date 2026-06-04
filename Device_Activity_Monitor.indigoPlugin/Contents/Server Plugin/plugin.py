@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
-# Author:      CliveS & Claude Opus 4.7
-# Date:        23-05-2026
-# Version:     1.9.6
+# Author:      CliveS & Claude Opus 4.8
+# Date:        04-06-2026
+# Version:     1.9.7
 #
 # v1.9.5 (23-05-2026):
 # - Three new menu items to toggle plugin behaviour at runtime, no restart
@@ -917,7 +917,7 @@ class Plugin(indigo.PluginBase):
           3. Save and re-run discovery (Plugins > Device Activity Monitor > Discover Devices)
           The device will now appear commented-out on every future re-discovery.
         """
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.info(f"[{ts}] [Device Activity Monitor] Device discovery starting...")
 
         # --- Read excluded_ids from existing config (preserved across re-discovery) ---
@@ -1117,7 +1117,7 @@ class Plugin(indigo.PluginBase):
 
     def menuFindContactSensors(self):
         """Log all contact/door/window and motion/occupancy sensor candidates."""
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.info(f"[{ts}] === Contact & Motion Sensor Discovery ===")
 
         contact_found = []
@@ -1179,7 +1179,7 @@ class Plugin(indigo.PluginBase):
         self._validate_monitored_devices()
         self._validate_monitored_variables()
 
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.info(
             f"[{ts}] [Device Activity Monitor] Config reloaded - "
             f"{old_dev_count} -> {len(self.device_monitor)} devices, "
