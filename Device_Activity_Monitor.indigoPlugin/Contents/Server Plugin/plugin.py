@@ -4,7 +4,7 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.8
 # Date:        04-06-2026
-# Version:     1.9.7
+# Version:     1.9.8
 #
 # v1.9.5 (23-05-2026):
 # - Three new menu items to toggle plugin behaviour at runtime, no restart
@@ -524,6 +524,12 @@ class Plugin(indigo.PluginBase):
     def deviceDeleted(self, dev):
         super().deviceDeleted(dev)
 
+        # damGroup cleanup — merged from a second deviceDeleted that used to shadow this one
+        # (Python keeps only the last def, so the monitored-device warning below never ran).
+        if dev.deviceTypeId == "damGroup":
+            self.device_groups.pop(dev.id, None)
+            self._rebuild_group_index()
+
         if not self.log_enabled:
             return
 
@@ -700,8 +706,8 @@ class Plugin(indigo.PluginBase):
                 {"key": "lastFiringTime",      "value": ts},
                 {"key": "lastFiringDirection", "value": direction},
             ])
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger.debug(f"[Device Activity Monitor] could not update firing diagnostics: {exc}")
 
     # ======================================
     # damGroup DEVICE LIFECYCLE (v1.8.0)
@@ -732,12 +738,6 @@ class Plugin(indigo.PluginBase):
         picker that doesn't affect runtime behaviour.
         """
         return oldDevice.pluginProps.get("memberList") != newDevice.pluginProps.get("memberList")
-
-    def deviceDeleted(self, dev):
-        super().deviceDeleted(dev)
-        if dev.deviceTypeId == "damGroup":
-            self.device_groups.pop(dev.id, None)
-            self._rebuild_group_index()
 
     def _refresh_smgroup_states(self, dev, members):
         """Set the damGroup device's display state lines."""
@@ -935,7 +935,10 @@ class Plugin(indigo.PluginBase):
                         f"[{ts}] [Device Activity Monitor] Preserving {len(excluded_ids)} "
                         f"excluded device(s) from existing config"
                     )
-            except Exception:
+            except Exception as exc:
+                self.logger.warning(
+                    f"[Device Activity Monitor] could not read excluded ids from existing config: {exc}"
+                )
                 excluded_ids = set()
 
         all_devices     = []
@@ -1501,7 +1504,13 @@ class Plugin(indigo.PluginBase):
         # --- Build self.device_monitor from "devices" list ---
         self.device_monitor = {}
         for entry in config.get("devices", []):
-            dev_id     = int(entry["id"])
+            try:
+                dev_id = int(entry["id"])
+            except (KeyError, ValueError, TypeError):
+                self.logger.warning(
+                    f"[Device Activity Monitor] skipping config entry with missing/invalid id: {entry!r}"
+                )
+                continue
             state_conf = {
                 "state": entry.get("state", "onState"),
                 "label": entry.get("label", entry.get("name", f"Device {dev_id}")),
