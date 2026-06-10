@@ -107,14 +107,14 @@ else:
             log(f"  ID     : {d['id']}")
             log(f"  Folder : {d['folder']}")
             if "contact" in d["states"]:
-                log(f"  -> state: 'contact'  (zigbee2mqtt: True=CLOSED, False=OPEN)")
-                log(f"     Config entry:")
+                log("  -> state: 'contact'  (zigbee2mqtt: True=CLOSED, False=OPEN)")
+                log("     Config entry:")
                 log(f"     {{\"id\": {d['id']}, \"name\": \"{d['name']}\", "
                     f"\"state\": \"contact\", \"label\": \"{d['name']}\", "
                     f"\"on_text\": \"CLOSED\", \"off_text\": \"OPEN\"}}")
             else:
-                log(f"  -> state: 'onState'  (True=OPEN, False=CLOSED)")
-                log(f"     Config entry:")
+                log("  -> state: 'onState'  (True=OPEN, False=CLOSED)")
+                log("     Config entry:")
                 log(f"     {{\"id\": {d['id']}, \"name\": \"{d['name']}\", "
                     f"\"state\": \"onState\", \"label\": \"{d['name']}\", "
                     f"\"on_text\": \"OPEN\", \"off_text\": \"CLOSED\"}}")
@@ -129,7 +129,7 @@ else:
             log(f"  ID     : {d['id']}")
             log(f"  Folder : {d['folder']}")
             log(f"  States : {d['mot_states']}")
-            log(f"  Config entries (one per state):")
+            log("  Config entries (one per state):")
             for state_name in d["mot_states"]:
                 log(f"     {{\"id\": {d['id']}, \"name\": \"{d['name']}\", "
                     f"\"state\": \"{state_name}\", \"label\": \"{d['name']}\", "

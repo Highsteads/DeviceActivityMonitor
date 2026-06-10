@@ -3,8 +3,8 @@
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.8
-# Date:        04-06-2026
-# Version:     1.9.8
+# Date:        10-06-2026
+# Version:     1.9.9
 #
 # v1.9.5 (23-05-2026):
 # - Three new menu items to toggle plugin behaviour at runtime, no restart
@@ -158,7 +158,6 @@ except ImportError:
 
 import json
 import os
-import platform
 import re
 import sys as _sys
 from datetime import datetime

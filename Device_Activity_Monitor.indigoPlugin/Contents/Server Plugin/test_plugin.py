@@ -1754,7 +1754,7 @@ class TestMenuCallbacks(unittest.TestCase):
 # ======================================
 
 if __name__ == "__main__":
-    print(f"\nSensor Monitor Plugin - Mock Test Suite")
+    print("\nSensor Monitor Plugin - Mock Test Suite")
     print(f"plugin.py: {_plugin_path}")
     print(f"Monitored devices in DEVICE_MONITOR:    {len(DEVICE_MONITOR)}")
     print(f"Monitored variables in VARIABLE_MONITOR: {len(VARIABLE_MONITOR)}\n")
