@@ -525,8 +525,8 @@ this section exists only for completeness if I ever do a clean reinstall.)
 | 1.1.0   | 2026-02-27 | Startup validation, rename detection, deletion warning |
 | 1.0.0   | 2026-02-27 | Initial release |
 
----
+## Authors & licence
 
-## License
+Vibed into existence by **CliveS**, who knew what he wanted, argued until he got it, and tested it on a real house. Typed at inhuman speed by **Claude** (Anthropic), who mostly did as it was told.
 
-GPL-3.0 — see plugin source files for details.
+© 2026 CliveS · [MIT licence](LICENSE) — copy it, fork it, bend it, break it, fix it, ship it. If it breaks, you get to keep both pieces.
