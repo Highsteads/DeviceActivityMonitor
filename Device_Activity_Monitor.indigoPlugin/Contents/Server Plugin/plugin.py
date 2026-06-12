@@ -3,8 +3,19 @@
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.8
-# Date:        10-06-2026
-# Version:     1.9.9
+# Date:        12-06-2026
+# Version:     1.9.10
+#
+# v1.9.10 (12-06-2026):
+# - Discovery now recognises Matter (indigo-matter) presence/contact sensors.
+#   The Matter motion device (deviceTypeId matterMotionSensor) carries presence
+#   on the native onState with no fine-grained motion state and no motion
+#   keyword in its name, so it was mis-filed as a generic "other" device and
+#   left commented-out — i.e. silently unmonitored. matterMotionSensor now
+#   classifies as motion and matterContactSensor as contact, both via the
+#   onState path (MOTION/CLEAR). The Matter VALUE sensors (temperature/
+#   humidity/illuminance) are intentionally not auto-activated. First seen with
+#   an Aqara FP300 commissioned via the indigo-matter plugin (Thread/Matter).
 #
 # v1.9.5 (23-05-2026):
 # - Three new menu items to toggle plugin behaviour at runtime, no restart
@@ -231,6 +242,19 @@ _MOTION_STATE_PRIORITY = ("occupancy", "presence", "motion",
 _Z2M_BRIDGE_PLUGIN_ID  = "com.clives.indigoplugin.z2mbridge"
 _Z2M_CONTACT_TYPE_IDS   = {"z2mContactSensor"}
 _Z2M_OCCUPANCY_TYPE_IDS = {"z2mOccupancySensor"}
+
+# Matter (simons-plugins/indigo-matter) sensor device types — authoritative
+# classification by deviceTypeId. The Matter motion/occupancy device carries
+# presence on the NATIVE onState (its states are just onOffState + batteryLevel,
+# with no fine-grained motion/occupancy/pir state and no motion keyword in the
+# product name), so without this hint the classifier mis-files it as a generic
+# "other" device, commented-out. Once classified as motion it joins the same
+# onState-fallback path as Z-Wave motion sensors (_disc_motion_states returns
+# ["onState"] when no fine-grained motion state exists). The Matter VALUE
+# sensors (matterTemperatureSensor/Humidity/Illuminance) are deliberately NOT
+# here — they are not on/off activity devices.
+_MATTER_CONTACT_TYPE_IDS = {"matterContactSensor"}
+_MATTER_MOTION_TYPE_IDS  = {"matterMotionSensor"}
 
 # ======================================
 # NAME EXCLUSION KEYWORDS
@@ -1309,6 +1333,11 @@ class Plugin(indigo.PluginBase):
             return True
         if type_id in _Z2M_OCCUPANCY_TYPE_IDS:
             return False
+        # Matter (indigo-matter) device-type hints — authoritative.
+        if type_id in _MATTER_CONTACT_TYPE_IDS:
+            return True
+        if type_id in _MATTER_MOTION_TYPE_IDS:
+            return False
 
         # 3. Motion keyword veto — beats state-key match
         name_lower = dev.name.lower()
@@ -1369,6 +1398,11 @@ class Plugin(indigo.PluginBase):
         # is the only reliable signal.
 
         if getattr(dev, "deviceTypeId", "") in _Z2M_OCCUPANCY_TYPE_IDS:
+            return True
+
+        # Matter (indigo-matter) motion/occupancy device — presence on native
+        # onState; no fine-grained motion state, so authoritative by typeId.
+        if getattr(dev, "deviceTypeId", "") in _MATTER_MOTION_TYPE_IDS:
             return True
 
         # State-name match — skip for Z2M generic devices (stub fields unreliable).
