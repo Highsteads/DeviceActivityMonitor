@@ -25,14 +25,19 @@ from unittest.mock import MagicMock
 
 class MockDevice:
     """Simulates an Indigo device object."""
-    def __init__(self, dev_id, name, on_state=False, states=None, enabled=True, plugin_id=""):
-        self.id       = dev_id
-        self.name     = name
-        self.onState  = on_state
-        self.states   = states or {}
-        self.enabled  = enabled
-        self.folderId = None  # no folder by default
-        self.pluginId = plugin_id
+    def __init__(self, dev_id, name, on_state=False, states=None, enabled=True,
+                 plugin_id="", device_type_id=""):
+        self.id           = dev_id
+        self.name         = name
+        self.onState      = on_state
+        self.states       = states or {}
+        self.enabled      = enabled
+        self.folderId     = None  # no folder by default
+        self.pluginId     = plugin_id
+        # deviceDeleted() reads dev.deviceTypeId to spot damGroup devices; a real
+        # Indigo device always has one, so the mock must too (default "" = an
+        # ordinary monitored device, not a damGroup).
+        self.deviceTypeId = device_type_id
 
     def __repr__(self):
         return f"MockDevice(id={self.id}, name='{self.name}', onState={self.onState})"
@@ -45,13 +50,15 @@ class MockThermostatDevice:
     types (thermostats, plain button devices) from contact sensor candidates,
     even when their names contain keywords like 'door' or 'garage'.
     """
-    def __init__(self, dev_id, name, states=None, enabled=True, plugin_id=""):
-        self.id       = dev_id
-        self.name     = name
-        self.states   = states or {}
-        self.enabled  = enabled
-        self.folderId = None
-        self.pluginId = plugin_id
+    def __init__(self, dev_id, name, states=None, enabled=True, plugin_id="",
+                 device_type_id=""):
+        self.id           = dev_id
+        self.name         = name
+        self.states       = states or {}
+        self.enabled      = enabled
+        self.folderId     = None
+        self.pluginId     = plugin_id
+        self.deviceTypeId = device_type_id
         # Note: intentionally no self.onState attribute
 
     def __repr__(self):
