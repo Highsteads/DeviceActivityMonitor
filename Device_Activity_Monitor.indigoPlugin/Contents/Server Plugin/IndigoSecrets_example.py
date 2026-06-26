@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
-# Filename:    secrets_example.py
+# Filename:    IndigoSecrets_example.py
 # Description: Template for IndigoSecrets.py — copy to IndigoSecrets.py and fill in your values.
 #              IndigoSecrets.py lives at:
 #                  /Library/Application Support/Perceptive Automation/IndigoSecrets.py
@@ -28,7 +28,9 @@
 #
 # HOW PLUGINS USE IT
 # Each plugin does: sys.path.insert(0, "/Library/Application Support/Perceptive Automation")
-# then: from secrets import KEY_NAME
+# then: from IndigoSecrets import KEY_NAME
+# (NEVER "from secrets import ..." — that shadows Python's stdlib secrets module, which is
+#  exactly why the file was renamed from secrets.py to IndigoSecrets.py.)
 # If IndigoSecrets.py is missing or a key is absent, the plugin falls back to the
 # value entered in its own configuration dialog (Plugins → Plugin Name → Configure).
 #
@@ -38,8 +40,10 @@
 # credentials. Our IndigoSecrets.py is a separate, purpose-built solution.
 #
 # FIRST-TIME SETUP
-# Copy this file to:
-#     /Library/Application Support/Perceptive Automation/IndigoSecrets.py
+# Copy this file into the folder:
+#     /Library/Application Support/Perceptive Automation/
+# then RENAME the copy from  IndigoSecrets_example.py  to  IndigoSecrets.py
+# (the plugins import from IndigoSecrets, not from IndigoSecrets_example).
 # Fill in the values for the plugins you use. You only need the sections for
 # plugins you have installed.
 #
