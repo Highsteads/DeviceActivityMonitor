@@ -1935,6 +1935,161 @@ class TestReadExistingConfig(unittest.TestCase):
 
 
 # ======================================
+# v1.9.12 DEEP-REVIEW REGRESSION TESTS
+# ======================================
+
+
+class _MockRelayDevice(MockDevice):
+    """Class name ends with 'RelayDevice' so the actuator-class veto sees it
+    exactly as it sees a real indigo.RelayDevice (locks, relays, openers)."""
+    pass
+
+
+class TestSignificantStates(unittest.TestCase):
+    """v1.9.12 regression: bookkeeping-state churn (lastSeen, linkQuality,
+    battery...) must not count as a significant change — zigbee2mqtt
+    duplicate publishes bump lastSeen and used to double-fire fireOn='any'
+    group triggers."""
+
+    def test_bookkeeping_only_change_is_not_significant(self):
+        old = MockDevice(1, "S", states={"contact": True, "lastSeen": 100, "linkquality": 50})
+        new = MockDevice(1, "S", states={"contact": True, "lastSeen": 200, "linkquality": 60})
+        self.assertFalse(Plugin._significant_states_changed(old, new))
+
+    def test_real_state_change_is_significant(self):
+        old = MockDevice(1, "S", states={"contact": True,  "lastSeen": 100})
+        new = MockDevice(1, "S", states={"contact": False, "lastSeen": 200})
+        self.assertTrue(Plugin._significant_states_changed(old, new))
+
+    def test_added_state_key_is_significant(self):
+        old = MockDevice(1, "S", states={"contact": True})
+        new = MockDevice(1, "S", states={"contact": True, "tamper": True})
+        self.assertTrue(Plugin._significant_states_changed(old, new))
+
+
+class TestGroupTriggerFiring(unittest.TestCase):
+    """v1.9.12: first direct tests of the group-trigger firing path (the
+    plugin's core feature — previously untested), including the fireOn
+    direction filter, bookkeeping-churn suppression and per-trigger
+    failure isolation."""
+
+    GROUP_ID  = 5555
+    MEMBER_ID = 101
+
+    def setUp(self):
+        self.plugin = make_plugin()
+        self.plugin.device_groups[self.GROUP_ID] = {
+            "name": "Test Group", "members": {self.MEMBER_ID}}
+        self.plugin._rebuild_group_index()
+        mock_indigo.trigger.execute.reset_mock()
+
+    def _trigger(self, trig_id=1, fire_on="any"):
+        trigger = MagicMock()
+        trigger.id           = trig_id
+        trigger.pluginTypeId = "damGroupChange"
+        trigger.name         = f"Test Trigger {trig_id}"
+        trigger.pluginProps  = {"groupDevice": str(self.GROUP_ID),
+                                "fireOn": fire_on, "saveBool": False}
+        self.plugin.event_triggers[trig_id] = trigger
+        return trigger
+
+    def _update(self, old_on, new_on, old_states=None, new_states=None):
+        old = MockDevice(self.MEMBER_ID, "Member", on_state=old_on,
+                         states=old_states or {})
+        new = MockDevice(self.MEMBER_ID, "Member", on_state=new_on,
+                         states=new_states or {})
+        self.plugin.deviceUpdated(old, new)
+
+    def test_any_fires_on_onstate_flip(self):
+        self._trigger(fire_on="any")
+        self._update(False, True)
+        mock_indigo.trigger.execute.assert_called_once()
+
+    def test_any_does_not_fire_on_bookkeeping_churn(self):
+        self._trigger(fire_on="any")
+        self._update(False, False,
+                     old_states={"lastSeen": 1, "occupancy": False},
+                     new_states={"lastSeen": 2, "occupancy": False})
+        mock_indigo.trigger.execute.assert_not_called()
+
+    def test_activated_fires_only_on_rising_edge(self):
+        self._trigger(fire_on="activated")
+        self._update(True, False)   # falling edge — no fire
+        mock_indigo.trigger.execute.assert_not_called()
+        self._update(False, True)   # rising edge — fires
+        mock_indigo.trigger.execute.assert_called_once()
+
+    def test_deactivated_fires_only_on_falling_edge(self):
+        self._trigger(fire_on="deactivated")
+        self._update(False, True)   # rising edge — no fire
+        mock_indigo.trigger.execute.assert_not_called()
+        self._update(True, False)   # falling edge — fires
+        mock_indigo.trigger.execute.assert_called_once()
+
+    def test_non_member_device_does_not_fire(self):
+        self._trigger(fire_on="any")
+        old = MockDevice(999, "Stranger", on_state=False)
+        new = MockDevice(999, "Stranger", on_state=True)
+        self.plugin.deviceUpdated(old, new)
+        mock_indigo.trigger.execute.assert_not_called()
+
+    def test_group_toggle_off_suppresses_firing(self):
+        self._trigger(fire_on="any")
+        self.plugin.group_enabled = False
+        self._update(False, True)
+        mock_indigo.trigger.execute.assert_not_called()
+
+    def test_one_broken_trigger_does_not_block_the_rest(self):
+        broken = self._trigger(trig_id=1)
+        broken.pluginProps = None   # .get on None raises inside the loop
+        self._trigger(trig_id=2)
+        self._update(False, True)
+        mock_indigo.trigger.execute.assert_called_once()
+        # And the failure was logged, not swallowed.
+        self.assertTrue(self.plugin.logger.error.called)
+
+
+class TestActuatorClassVeto(unittest.TestCase):
+    """v1.9.12 regression: actuator device classes (RelayDevice etc.) must
+    never be classified as sensors by NAME keywords — 'Front Door Lock' and
+    'Hall Garage Door Opener' are actuators. State-name matching still wins."""
+
+    def test_relay_with_door_name_is_not_contact(self):
+        plugin = make_plugin()
+        dev = _MockRelayDevice(1, "Front Door Lock", on_state=False)
+        self.assertFalse(plugin._disc_is_contact(dev, {}))
+
+    def test_relay_with_motion_name_is_not_motion(self):
+        plugin = make_plugin()
+        dev = _MockRelayDevice(2, "Drive Motion Floodlight Relay", on_state=False)
+        self.assertFalse(plugin._disc_is_motion(dev, {}))
+
+    def test_relay_with_real_contact_state_still_classifies(self):
+        plugin = make_plugin()
+        dev = _MockRelayDevice(3, "Odd Relay", on_state=False,
+                               states={"contact": True})
+        self.assertTrue(plugin._disc_is_contact(dev, {"contact": True}))
+
+    def test_plain_sensor_by_name_still_classifies(self):
+        plugin = make_plugin()
+        dev = MockDevice(4, "Shed Door Sensor", on_state=False)
+        self.assertTrue(plugin._disc_is_contact(dev, {}))
+
+
+class TestToggleFlush(unittest.TestCase):
+    """v1.9.12: _set_flag flips the attribute and the pref, and survives the
+    harness having no savePluginPrefs (the flush is best-effort)."""
+
+    def test_set_flag_flips_and_persists_pref(self):
+        plugin = make_plugin(prefs={"logEnabled": True})
+        plugin._set_flag("logEnabled", "log_enabled", "Device Change Log")
+        self.assertFalse(plugin.log_enabled)
+        self.assertFalse(plugin.pluginPrefs["logEnabled"])
+        plugin._set_flag("logEnabled", "log_enabled", "Device Change Log")
+        self.assertTrue(plugin.log_enabled)
+
+
+# ======================================
 # ENTRY POINT
 # ======================================
 

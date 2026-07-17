@@ -4,7 +4,30 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Fable 5
 # Date:        17-07-2026
-# Version:     1.9.11
+# Version:     1.9.12
+#
+# v1.9.12 (17-07-2026) — deep-review MEDIUM batch:
+# - Group triggers no longer fire on bookkeeping-state churn: lastSeen /
+#   linkQuality / battery / rssi etc. are ignored when deciding whether a
+#   member "changed". Fixes fireOn="any" triggers double-firing on
+#   zigbee2mqtt duplicate publishes and firing spuriously on radio
+#   housekeeping updates (new _significant_states_changed helper).
+# - Per-trigger failure isolation in _fire_group_triggers: one failing
+#   trigger (bad props, deleted group device) no longer aborts the
+#   remaining triggers for that event.
+# - Config + discovery files now written atomically (temp + fsync +
+#   os.replace) — a crash mid-write can't corrupt them.
+# - Runtime toggle flips are flushed to disk via savePluginPrefs() —
+#   previously they only persisted on a graceful shutdown.
+# - Discovery name-keyword classification now gated on device CLASS:
+#   actuators (RelayDevice/DimmerDevice/Thermostat/...) never qualify by
+#   name alone, so "Front Door Lock" / "Hall Garage Door Opener" stop
+#   being offered as contact sensors. State-name matching unaffected.
+# - triggerStartProcessing warning now distinguishes no-group-selected /
+#   invalid selection / empty group / deleted-or-disabled group device
+#   (and drops the stale pre-rename "Sensor Monitor Group" wording).
+# - +15 regression tests -> 128, including the first direct tests of the
+#   group-trigger firing path and fireOn direction filter.
 #
 # v1.9.11 (17-07-2026) — deep-review HIGH batch:
 # - didDeviceCommPropertyChange now compares memberIds (the persistent
@@ -284,6 +307,26 @@ _Z2M_OCCUPANCY_TYPE_IDS = {"z2mOccupancySensor"}
 _MATTER_CONTACT_TYPE_IDS = {"matterContactSensor"}
 _MATTER_MOTION_TYPE_IDS  = {"matterMotionSensor"}
 
+# States that change constantly without representing real device activity —
+# ignored when deciding whether a group trigger should fire. Without this,
+# zigbee2mqtt duplicate publishes (which bump lastSeen) double-fire
+# fireOn="any" triggers, and link-quality/battery churn fires them spuriously.
+_BOOKKEEPING_STATE_KEYS = {
+    "lastSeen", "lastseen", "linkQuality", "linkquality", "lqi", "rssi",
+    "voltage", "battery", "batteryLevel", "lastUpdate", "lastUpdated",
+}
+
+# Device classes that must never be classified as sensors via NAME keywords —
+# relays, dimmers, locks (RelayDevice), thermostats etc. can carry sensor-ish
+# names ("Front Door Lock", "Hall Garage Door Opener") but are actuators, and
+# monitoring them as contact/motion sensors causes false triggers. State-name
+# matching is unaffected. Matched via endswith so subclass names (and the test
+# harness's Mock*Device classes) behave correctly.
+_ACTUATOR_CLASS_SUFFIXES = (
+    "RelayDevice", "DimmerDevice", "ThermostatDevice",
+    "SpeedControlDevice", "SprinklerDevice", "MultiIODevice",
+)
+
 # ======================================
 # NAME EXCLUSION KEYWORDS
 #
@@ -491,7 +534,7 @@ class Plugin(indigo.PluginBase):
         # which transitions actually fire. v1.9.5: gated by group_enabled flag.
         if self.group_enabled and newDev.id in self.group_members:
             try:
-                states_changed = (newDev.states != origDev.states)
+                states_changed = self._significant_states_changed(origDev, newDev)
                 onstate_flip   = (
                     getattr(newDev, "onState", None)
                     != getattr(origDev, "onState", None)
@@ -655,11 +698,22 @@ class Plugin(indigo.PluginBase):
         (indigo.server.fireEvent and self.triggerEvent do NOT exist.)"""
         self.event_triggers[trigger.id] = trigger
         if not self._resolve_trigger_group(trigger):
-            label = trigger.pluginProps.get("groupDevice", "(unset)")
+            sel = str(trigger.pluginProps.get("groupDevice", "") or "").strip()
+            if not sel or sel == "none":
+                detail = ("has no group selected — open the trigger and pick a "
+                          "Device Activity Monitor Group device")
+            elif not sel.lstrip("-").isdigit():
+                detail = (f"has an invalid group selection ({sel!r}) — open the "
+                          f"trigger and re-pick the group")
+            elif int(sel) in self.device_groups:
+                detail = (f"points at group '{self.device_groups[int(sel)]['name']}' "
+                          f"which has no members yet — add devices to the group")
+            else:
+                detail = (f"points at group device id {sel} which is not loaded "
+                          f"(deleted or disabled) — open the trigger and re-pick "
+                          f"the group")
             self.logger.warning(
-                f"[Device Activity Monitor] Trigger '{trigger.name}' has no group "
-                f"selected ({label}) — open the trigger and pick a Sensor "
-                f"Monitor Group device."
+                f"[Device Activity Monitor] Trigger '{trigger.name}' {detail}."
             )
 
     def triggerStopProcessing(self, trigger):
@@ -686,6 +740,28 @@ class Plugin(indigo.PluginBase):
                 return self.device_groups[dev_id]["members"]
         return set()
 
+    @staticmethod
+    def _significant_states_changed(origDev, newDev):
+        """True when any non-bookkeeping state differs between orig and new.
+
+        Bookkeeping states (lastSeen, linkQuality, battery, ...) change on
+        every radio publish — including zigbee2mqtt's duplicate publishes —
+        without representing real activity, so they must not fire
+        fireOn="any" group triggers.
+        """
+        try:
+            old_states = origDev.states
+            new_states = newDev.states
+            keys = set(old_states.keys()) | set(new_states.keys())
+        except Exception:
+            return False
+        for key in keys:
+            if key in _BOOKKEEPING_STATE_KEYS:
+                continue
+            if old_states.get(key) != new_states.get(key):
+                return True
+        return False
+
     def _fire_group_triggers(self, origDev, newDev):
         """Fire any damGroupChange triggers whose group contains newDev.id,
         subject to the per-trigger fireOn direction filter:
@@ -701,44 +777,53 @@ class Plugin(indigo.PluginBase):
         flipped = on_new != on_old
 
         for trigger in self.event_triggers.values():
-            if trigger.pluginTypeId != "damGroupChange":
-                continue
-            members = self._resolve_trigger_group(trigger)
-            if newDev.id not in members:
-                continue
+            # Per-trigger isolation: one failing trigger (bad props, deleted
+            # group device, execute error) must not abort the remaining
+            # triggers for this event.
+            try:
+                if trigger.pluginTypeId != "damGroupChange":
+                    continue
+                members = self._resolve_trigger_group(trigger)
+                if newDev.id not in members:
+                    continue
 
-            fire_on = trigger.pluginProps.get("fireOn", "any")
-            if fire_on == "activated":
-                if not (flipped and on_new):
-                    continue
-                direction = "activated"
-            elif fire_on == "deactivated":
-                if not (flipped and not on_new):
-                    continue
-                direction = "deactivated"
-            else:
-                direction = (
-                    "activated"   if (flipped and on_new) else
-                    "deactivated" if (flipped and not on_new) else
-                    "changed"
+                fire_on = trigger.pluginProps.get("fireOn", "any")
+                if fire_on == "activated":
+                    if not (flipped and on_new):
+                        continue
+                    direction = "activated"
+                elif fire_on == "deactivated":
+                    if not (flipped and not on_new):
+                        continue
+                    direction = "deactivated"
+                else:
+                    direction = (
+                        "activated"   if (flipped and on_new) else
+                        "deactivated" if (flipped and not on_new) else
+                        "changed"
+                    )
+
+                # Optional: save the firing device to a variable before firing,
+                # so the trigger's actions can read it via %%v:NN%% substitution.
+                if trigger.pluginProps.get("saveBool", False):
+                    self._save_firing_device(trigger, newDev)
+
+                # Update the damGroup device's diagnostic states (last firing
+                # device / time / direction) so control pages can show activity.
+                self._update_smgroup_diagnostics(trigger, newDev, direction)
+
+                indigo.trigger.execute(trigger)
+                ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                self.logger.debug(
+                    f"[{ts}] [Device Activity Monitor] Fired group trigger "
+                    f"'{trigger.name}' (fireOn={fire_on}, direction={direction}) "
+                    f"for {newDev.name}"
                 )
-
-            # Optional: save the firing device to a variable before firing,
-            # so the trigger's actions can read it via %%v:NN%% substitution.
-            if trigger.pluginProps.get("saveBool", False):
-                self._save_firing_device(trigger, newDev)
-
-            # Update the damGroup device's diagnostic states (last firing
-            # device / time / direction) so control pages can show activity.
-            self._update_smgroup_diagnostics(trigger, newDev, direction)
-
-            indigo.trigger.execute(trigger)
-            ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            self.logger.debug(
-                f"[{ts}] [Device Activity Monitor] Fired group trigger "
-                f"'{trigger.name}' (fireOn={fire_on}, direction={direction}) "
-                f"for {newDev.name}"
-            )
+            except Exception as exc:
+                self.logger.error(
+                    f"[Device Activity Monitor] group trigger "
+                    f"'{getattr(trigger, 'name', '?')}' failed: {exc}"
+                )
 
     def _update_smgroup_diagnostics(self, trigger, dev, direction):
         """Update lastFiringDevice/Time/Direction states on the damGroup
@@ -1060,8 +1145,8 @@ class Plugin(indigo.PluginBase):
                 "motion_sensors":     motion_sensors,
                 "all_devices":        all_devices,
             }
-            with open(DISCOVERY_OUTPUT_PATH, "w", encoding="utf-8") as f:
-                json.dump(discovery_output, f, indent=2, default=str)
+            self._write_atomic(DISCOVERY_OUTPUT_PATH,
+                               json.dumps(discovery_output, indent=2, default=str))
             self.logger.info(f"[{ts}] Full device list saved to: {DISCOVERY_OUTPUT_PATH}")
         except Exception as e:
             self.logger.error(f"[{ts}] ERROR saving device_discovery.json: {e}")
@@ -1165,8 +1250,7 @@ class Plugin(indigo.PluginBase):
             lines.append("}")
 
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+            self._write_atomic(CONFIG_PATH, "\n".join(lines) + "\n")
             self.logger.info(f"[{ts}] Plugin config saved to: {CONFIG_PATH}")
         except Exception as e:
             self.logger.error(f"[{ts}] ERROR saving device_activity_monitor_config.json: {e}")
@@ -1280,6 +1364,18 @@ class Plugin(indigo.PluginBase):
         there as needed.
         """
         return getattr(dev, "pluginId", "") in _EXCLUDED_PLUGIN_IDS
+
+    @staticmethod
+    def _disc_is_actuator_class(dev):
+        """True when dev's Indigo class is an actuator (relay/dimmer/lock/
+        thermostat/speed-control/sprinkler/multi-IO).
+
+        Such devices must never be classified as sensors by NAME keyword
+        alone — "Front Door Lock" and "Hall Garage Door Opener" carry
+        contact keywords but are actuators, and monitoring them as sensors
+        causes false triggers. State-name matching is unaffected.
+        """
+        return dev.__class__.__name__.endswith(_ACTUATOR_CLASS_SUFFIXES)
 
     def _disc_is_name_excluded(self, dev):
         """Return True if dev's name contains an exclusion keyword.
@@ -1402,8 +1498,11 @@ class Plugin(indigo.PluginBase):
         if not is_z2m_generic and (_CONTACT_STATE_NAMES & set(states.keys())):
             return True
 
-        # 5. Name-keyword match
+        # 5. Name-keyword match — gated on device class: actuators (relays,
+        #    dimmers, locks, thermostats) never qualify by name alone.
         if not hasattr(dev, "onState"):
+            return False
+        if self._disc_is_actuator_class(dev):
             return False
         if any(kw in name_lower for kw in _NAME_EXCLUSION_KEYWORDS):
             return False
@@ -1462,7 +1561,10 @@ class Plugin(indigo.PluginBase):
         if not is_z2m_generic and (_MOTION_STATE_NAMES & set(states.keys())):
             return True
 
+        # Name-keyword match — gated on device class as per _disc_is_contact.
         if not hasattr(dev, "onState"):
+            return False
+        if self._disc_is_actuator_class(dev):
             return False
         name_lower = dev.name.lower()
         if any(kw in name_lower for kw in _NAME_EXCLUSION_KEYWORDS):
@@ -1556,6 +1658,17 @@ class Plugin(indigo.PluginBase):
     # ======================================
     # PRIVATE HELPERS
     # ======================================
+
+    @staticmethod
+    def _write_atomic(path, text):
+        """Write text to path atomically (temp file + fsync + os.replace) so
+        a crash mid-write can never leave a truncated/corrupt file behind."""
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
 
     @staticmethod
     def _parse_config_text(lines):
@@ -1782,6 +1895,12 @@ class Plugin(indigo.PluginBase):
         new_value = not getattr(self, attr_name)
         setattr(self, attr_name, new_value)
         self.pluginPrefs[pref_key] = new_value
+        # Flush to disk now — pluginPrefs otherwise only persist on a
+        # graceful shutdown, so a crash would silently revert the toggle.
+        try:
+            self.savePluginPrefs()
+        except Exception:
+            pass
         state = "ON" if new_value else "OFF"
         indigo.server.log(f"[Device Activity Monitor] {label} -> {state}")
 
