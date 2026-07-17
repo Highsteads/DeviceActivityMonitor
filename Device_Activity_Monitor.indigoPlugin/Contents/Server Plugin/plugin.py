@@ -2,9 +2,37 @@
 # -*- coding: utf-8 -*-
 # Filename:    plugin.py
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
-# Author:      CliveS & Claude Opus 4.8
-# Date:        12-06-2026
-# Version:     1.9.10
+# Author:      CliveS & Claude Fable 5
+# Date:        17-07-2026
+# Version:     1.9.11
+#
+# v1.9.11 (17-07-2026) — deep-review HIGH batch:
+# - didDeviceCommPropertyChange now compares memberIds (the persistent
+#   membership store deviceStartComm parses) instead of memberList (the
+#   transient Members-list selection widget). Before this fix, membership
+#   edits saved via the group ConfigUI silently never took effect until a
+#   plugin restart — new members didn't fire damGroupChange triggers and
+#   removed members kept firing them.
+# - _load_config: the variables loop now has the same skip-and-warn guard
+#   as the devices loop. Previously one malformed hand-edited variables
+#   entry raised out of __init__ and the whole plugin failed to load.
+# - Generated config entries are emitted via json.dumps — a device name
+#   containing a quote or backslash can no longer corrupt the generated
+#   config file (which silently reverted the plugin to the hardcoded
+#   fallback dicts on next load).
+# - Discover Devices now preserves the user's monitored variables section
+#   and per-entry customisations (label / on_text / off_text / on_value /
+#   off_value) across re-discovery — previously only excluded_ids
+#   survived and everything else was silently reset. If the existing
+#   config cannot be parsed, discovery refuses to overwrite it instead of
+#   clobbering the user's edits with a blank slate.
+# - Removed the stale pre-rename standalone scripts discover_devices.py
+#   and find_contact_sensors.py: they wrote sensor_monitor_config.json to
+#   Logs/SensorMonitor/, a filename and location the plugin stopped
+#   reading at v1.7.1/v1.9.0, and carried an old copy of the classifier
+#   with none of the Z2M/Matter logic. The Discover Devices and Find
+#   Sensors menu items are the maintained replacements.
+# - +9 regression tests -> 113.
 #
 # v1.9.10 (12-06-2026):
 # - Discovery now recognises Matter (indigo-matter) presence/contact sensors.
@@ -757,10 +785,12 @@ class Plugin(indigo.PluginBase):
     def didDeviceCommPropertyChange(oldDevice, newDevice):
         """Restart comm only when the group membership list changes.
 
-        memberList is what the monitor watches; folderFilter is a UI-only
-        picker that doesn't affect runtime behaviour.
+        memberIds (the hidden comma-separated textfield) is the persistent
+        membership store that deviceStartComm parses; memberList and
+        availableList are transient list-widget selections, and folderFilter
+        is a UI-only picker — none of those affect runtime behaviour.
         """
-        return oldDevice.pluginProps.get("memberList") != newDevice.pluginProps.get("memberList")
+        return oldDevice.pluginProps.get("memberIds") != newDevice.pluginProps.get("memberIds")
 
     def _refresh_smgroup_states(self, dev, members):
         """Set the damGroup device's display state lines."""
@@ -943,26 +973,29 @@ class Plugin(indigo.PluginBase):
         ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
         self.logger.info(f"[{ts}] [Device Activity Monitor] Device discovery starting...")
 
-        # --- Read excluded_ids from existing config (preserved across re-discovery) ---
-        excluded_ids = set()
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    existing_lines = f.readlines()
-                active_lines = [l for l in existing_lines if not l.lstrip().startswith("#")]
-                json_str     = re.sub(r",(\s*[}\]])", r"\1", "".join(active_lines))
-                existing_cfg = json.loads(json_str)
-                excluded_ids = set(int(x) for x in existing_cfg.get("excluded_ids", []))
-                if excluded_ids:
-                    self.logger.info(
-                        f"[{ts}] [Device Activity Monitor] Preserving {len(excluded_ids)} "
-                        f"excluded device(s) from existing config"
-                    )
-            except Exception as exc:
-                self.logger.warning(
-                    f"[Device Activity Monitor] could not read excluded ids from existing config: {exc}"
-                )
-                excluded_ids = set()
+        # --- Read the existing config in full (preserved across re-discovery) ---
+        # Preserves excluded_ids, the whole variables section, and per-entry
+        # user customisations (label / on_text / off_text / on_value /
+        # off_value). If the file exists but cannot be parsed, ABORT the
+        # config rewrite rather than silently discarding the user's
+        # exclusions and edits (device_discovery.json is still written).
+        ok, excluded_ids, var_entries, device_overrides = self._read_existing_config()
+        if not ok:
+            self.logger.error(
+                f"[Device Activity Monitor] Existing config file could not be parsed - "
+                f"discovery will NOT overwrite it. Fix or delete the file, then re-run: "
+                f"{CONFIG_PATH}"
+            )
+        if excluded_ids:
+            self.logger.info(
+                f"[{ts}] [Device Activity Monitor] Preserving {len(excluded_ids)} "
+                f"excluded device(s) from existing config"
+            )
+        if var_entries:
+            self.logger.info(
+                f"[{ts}] [Device Activity Monitor] Preserving {len(var_entries)} "
+                f"monitored variable(s) from existing config"
+            )
 
         all_devices     = []
         contact_sensors = []
@@ -1034,6 +1067,16 @@ class Plugin(indigo.PluginBase):
             self.logger.error(f"[{ts}] ERROR saving device_discovery.json: {e}")
 
         # --- Save device_activity_monitor_config.json ---
+        # Skipped when the existing config could not be parsed (ok False) —
+        # never clobber the user's exclusions and edits with a blank slate.
+        if not ok:
+            self.logger.error(
+                f"[{ts}] device_activity_monitor_config.json NOT rewritten - "
+                f"existing file unreadable (see error above). Discovery details "
+                f"were still saved to device_discovery.json."
+            )
+            return
+
         try:
             lines = ["{"]
             lines.append(f'  "_generated": "{datetime.now().isoformat()}",')
@@ -1054,7 +1097,8 @@ class Plugin(indigo.PluginBase):
                 for d in active_contacts:
                     dev_obj = indigo.devices[d["id"]]
                     lines.append(
-                        self._disc_config_entry(dev_obj, d["states"], commented=False) + ","
+                        self._disc_config_entry(dev_obj, d["states"], commented=False,
+                                                overrides_map=device_overrides) + ","
                     )
                 lines.append("")
 
@@ -1066,7 +1110,8 @@ class Plugin(indigo.PluginBase):
                     mot_states = self._disc_motion_states(d["states"])
                     for state_name in mot_states:
                         lines.append(
-                            self._disc_motion_entry(dev_obj, state_name, commented=False) + ","
+                            self._disc_motion_entry(dev_obj, state_name, commented=False,
+                                                    overrides_map=device_overrides) + ","
                         )
                 lines.append("")
 
@@ -1079,14 +1124,16 @@ class Plugin(indigo.PluginBase):
                 for d in excluded_contacts:
                     dev_obj = indigo.devices[d["id"]]
                     lines.append(
-                        self._disc_config_entry(dev_obj, d["states"], commented=True) + ","
+                        self._disc_config_entry(dev_obj, d["states"], commented=True,
+                                                overrides_map=device_overrides) + ","
                     )
                 for d in excluded_motions:
                     dev_obj    = indigo.devices[d["id"]]
                     mot_states = self._disc_motion_states(d["states"])
                     for state_name in mot_states:
                         lines.append(
-                            self._disc_motion_entry(dev_obj, state_name, commented=True) + ","
+                            self._disc_motion_entry(dev_obj, state_name, commented=True,
+                                                    overrides_map=device_overrides) + ","
                         )
                 lines.append("")
 
@@ -1097,7 +1144,8 @@ class Plugin(indigo.PluginBase):
                 for d in other:
                     dev_obj = indigo.devices[d["id"]]
                     lines.append(
-                        self._disc_config_entry(dev_obj, d["states"], commented=True) + ","
+                        self._disc_config_entry(dev_obj, d["states"], commented=True,
+                                                overrides_map=device_overrides) + ","
                     )
                 lines.append("")
 
@@ -1105,6 +1153,10 @@ class Plugin(indigo.PluginBase):
             lines.append("")
             lines.append('  "variables": [')
             lines.append("")
+            # Preserve the user's monitored variables verbatim (this section
+            # is user-owned — discovery never generates variable entries).
+            for v in var_entries:
+                lines.append("    " + json.dumps(v) + ",")
             lines.append(
                 '    # Add variables: {"id": 123456789, "name": "Var_Name", "label": "Display Label"}'
             )
@@ -1446,42 +1498,115 @@ class Plugin(indigo.PluginBase):
                 return [preferred]
         return ["onState"]
 
-    def _format_entry_line(self, dev, state, on_text, off_text, commented=False):
+    def _format_entry_line(self, dev, state, on_text, off_text, commented=False,
+                           overrides=None):
         """Return a formatted JSON object string for device_activity_monitor_config.json.
 
+        Values are emitted via json.dumps so a device name containing a quote
+        or backslash cannot corrupt the generated file (which would silently
+        revert the plugin to its hardcoded fallback dicts on next load).
+
+        overrides  optional dict of user-customised fields (label / on_text /
+                   off_text / on_value / off_value) carried over from the
+                   existing config so re-discovery preserves hand edits.
         commented=True  prepends '# ' so the entry is disabled by default.
         """
-        line = (
-            f'    {{"id": {dev.id}, "name": "{dev.name}", '
-            f'"state": "{state}", "label": "{dev.name}", '
-            f'"on_text": "{on_text}", "off_text": "{off_text}"}}'
-        )
+        entry = {
+            "id":       dev.id,
+            "name":     dev.name,
+            "state":    state,
+            "label":    dev.name,
+            "on_text":  on_text,
+            "off_text": off_text,
+        }
+        for key in ("label", "on_text", "off_text", "on_value", "off_value"):
+            if overrides and key in overrides:
+                entry[key] = overrides[key]
+        line = "    " + json.dumps(entry)
         return f"# {line}" if commented else line
 
-    def _disc_config_entry(self, dev, states, commented=False):
+    def _disc_config_entry(self, dev, states, commented=False, overrides_map=None):
         """Return a JSON config file line for a CONTACT sensor device.
 
         Uses 'contact' state if present (zigbee2mqtt: CLOSED=True / OPEN=False).
         Falls back to 'onState' with OPEN=True / CLOSED=False convention.
+        overrides_map  {(dev_id, state): entry} of existing config entries —
+                       user-customised fields are carried over on re-discovery.
         commented=True  prepends '# ' so the entry is disabled by default.
         """
         if "contact" in states:
             state, on_text, off_text = "contact", "CLOSED", "OPEN"
         else:
             state, on_text, off_text = "onState", "OPEN", "CLOSED"
-        return self._format_entry_line(dev, state, on_text, off_text, commented)
+        overrides = (overrides_map or {}).get((dev.id, state))
+        return self._format_entry_line(dev, state, on_text, off_text, commented,
+                                       overrides=overrides)
 
-    def _disc_motion_entry(self, dev, state_name, commented=False):
+    def _disc_motion_entry(self, dev, state_name, commented=False, overrides_map=None):
         """Return a JSON config file line for a MOTION sensor device and state.
 
         Uses MOTION / CLEAR as the text values (motion detected / clear).
+        overrides_map  as per _disc_config_entry.
         commented=True  prepends '# ' so the entry is disabled by default.
         """
-        return self._format_entry_line(dev, state_name, "MOTION", "CLEAR", commented)
+        overrides = (overrides_map or {}).get((dev.id, state_name))
+        return self._format_entry_line(dev, state_name, "MOTION", "CLEAR", commented,
+                                       overrides=overrides)
 
     # ======================================
     # PRIVATE HELPERS
     # ======================================
+
+    @staticmethod
+    def _parse_config_text(lines):
+        """Parse the comment-tolerant config format into a dict.
+
+        Strips # comment lines and trailing commas, then json.loads.
+        Shared by _load_config and _read_existing_config. Raises on
+        invalid JSON — callers decide how to handle that.
+        """
+        active_lines = [l for l in lines if not l.lstrip().startswith("#")]
+        json_str     = "".join(active_lines)
+        json_str     = re.sub(r",(\s*[}\]])", r"\1", json_str)
+        return json.loads(json_str)
+
+    def _read_existing_config(self, config_path=None):
+        """Read the existing config for re-discovery preservation.
+
+        Returns (ok, excluded_ids, var_entries, device_overrides):
+          ok               False ONLY when the file exists but cannot be
+                           parsed (a missing file is ok=True with empty data)
+          excluded_ids     set of ints from "excluded_ids"
+          var_entries      the "variables" list verbatim (user-owned section)
+          device_overrides {(dev_id, state): entry} for every ACTIVE device
+                           entry, so user-customised label/on_text/off_text/
+                           on_value/off_value survive a re-discovery run
+        """
+        path = config_path or CONFIG_PATH
+        if not os.path.exists(path):
+            return True, set(), [], {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing_cfg = self._parse_config_text(f.readlines())
+            excluded_ids = set(int(x) for x in existing_cfg.get("excluded_ids", []))
+            var_entries  = [dict(v) for v in existing_cfg.get("variables", [])
+                            if isinstance(v, dict)]
+            device_overrides = {}
+            for entry in existing_cfg.get("devices", []):
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    dev_id = int(entry["id"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                state = entry.get("state", "onState")
+                device_overrides[(dev_id, state)] = dict(entry)
+            return True, excluded_ids, var_entries, device_overrides
+        except Exception as exc:
+            self.logger.warning(
+                f"[Device Activity Monitor] could not parse existing config: {exc}"
+            )
+            return False, set(), [], {}
 
     def _load_config(self, config_path=None):
         """Load device and variable monitor lists from the JSON config file.
@@ -1508,16 +1633,7 @@ class Plugin(indigo.PluginBase):
 
         try:
             with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-
-            # Strip comment lines (first non-whitespace char is #)
-            active_lines = [l for l in lines if not l.lstrip().startswith("#")]
-            json_str     = "".join(active_lines)
-
-            # Remove trailing commas before ] or } (not valid JSON)
-            json_str = re.sub(r",(\s*[}\]])", r"\1", json_str)
-
-            config = json.loads(json_str)
+                config = self._parse_config_text(f.readlines())
 
         except Exception as e:
             # File exists but unreadable or invalid - fall back and warn
@@ -1559,9 +1675,18 @@ class Plugin(indigo.PluginBase):
             self.device_monitor.setdefault(dev_id, []).append(state_conf)
 
         # --- Build self.variable_monitor from "variables" list ---
+        # Guarded like the devices loop above: one malformed hand-edited
+        # entry must skip-and-warn, not raise out of __init__ and kill the
+        # whole plugin.
         self.variable_monitor = {}
         for entry in config.get("variables", []):
-            var_id = int(entry["id"])
+            try:
+                var_id = int(entry["id"])
+            except (KeyError, ValueError, TypeError):
+                self.logger.warning(
+                    f"[Device Activity Monitor] skipping variable config entry with missing/invalid id: {entry!r}"
+                )
+                continue
             self.variable_monitor[var_id] = {
                 "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
             }

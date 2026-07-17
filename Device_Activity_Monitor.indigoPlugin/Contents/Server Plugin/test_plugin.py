@@ -1757,6 +1757,184 @@ class TestMenuCallbacks(unittest.TestCase):
 
 
 # ======================================
+# v1.9.11 DEEP-REVIEW REGRESSION TESTS
+# ======================================
+
+import json as _json
+
+
+class TestGroupCommRestart(unittest.TestCase):
+    """v1.9.11 regression: didDeviceCommPropertyChange must watch memberIds.
+
+    The pre-fix code compared memberList — the transient Members-list
+    SELECTION widget — so membership edits saved via the ConfigUI never
+    restarted comm and the in-memory group stayed stale until plugin restart.
+    memberIds (hidden textfield) is the persistent membership store that
+    deviceStartComm parses.
+    """
+
+    class _Dev:
+        def __init__(self, props):
+            self.pluginProps = props
+
+    def test_memberids_change_restarts_comm(self):
+        old = self._Dev({"memberIds": "1,2",   "memberList": [], "availableList": []})
+        new = self._Dev({"memberIds": "1,2,3", "memberList": [], "availableList": []})
+        self.assertTrue(Plugin.didDeviceCommPropertyChange(old, new))
+
+    def test_ui_only_changes_do_not_restart_comm(self):
+        old = self._Dev({"memberIds": "1,2", "memberList": [],    "folderFilter": "__all__"})
+        new = self._Dev({"memberIds": "1,2", "memberList": ["1"], "folderFilter": "12345"})
+        self.assertFalse(Plugin.didDeviceCommPropertyChange(old, new))
+
+
+class TestConfigVariablesGuard(unittest.TestCase):
+    """v1.9.11 regression: a malformed variables entry is skipped with a
+    warning — it must NOT raise out of _load_config (and hence __init__),
+    which previously killed the whole plugin at startup."""
+
+    def test_malformed_variable_entries_skipped_good_ones_kept(self):
+        plugin = make_plugin()
+        cfg = {
+            "devices": [],
+            "variables": [
+                {"id": "not-a-number", "name": "Bad Id"},
+                {"name": "Missing Id"},
+                {"id": None, "name": "Null Id"},
+                {"id": 241032502, "label": "Lux"},
+            ],
+        }
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(cfg, f)
+            plugin._load_config(path)   # must not raise
+        finally:
+            os.unlink(path)
+        self.assertEqual(list(plugin.variable_monitor.keys()), [241032502])
+        self.assertEqual(plugin.variable_monitor[241032502]["label"], "Lux")
+
+
+class TestEntryEscaping(unittest.TestCase):
+    """v1.9.11 regression: generated config entries are emitted via
+    json.dumps, so a device name containing quotes/backslashes can no
+    longer corrupt the generated config file."""
+
+    def test_quoted_name_round_trips(self):
+        plugin = make_plugin()
+        dev  = MockDevice(999, 'Back "Patio" Door', states={"contact": True})
+        line = plugin._disc_config_entry(dev, {"contact": True})
+        parsed = _json.loads(line)
+        self.assertEqual(parsed["name"],  'Back "Patio" Door')
+        self.assertEqual(parsed["state"], "contact")
+        self.assertEqual(parsed["on_text"], "CLOSED")
+
+    def test_user_overrides_carried_on_rediscovery(self):
+        plugin = make_plugin()
+        dev = MockDevice(42, "Some Door", states={"contact": True})
+        overrides = {(42, "contact"): {"id": 42, "state": "contact",
+                                       "label": "My Door", "on_text": "SHUT"}}
+        line = plugin._disc_config_entry(dev, {"contact": True},
+                                         overrides_map=overrides)
+        parsed = _json.loads(line)
+        self.assertEqual(parsed["label"],   "My Door")
+        self.assertEqual(parsed["on_text"], "SHUT")
+        self.assertEqual(parsed["off_text"], "OPEN")  # non-overridden default kept
+
+
+class TestReadExistingConfig(unittest.TestCase):
+    """v1.9.11 regression: re-discovery preserves the user's variables
+    section, excluded_ids and per-entry customisations — and refuses to
+    rewrite a config file it cannot parse."""
+
+    def _write(self, text):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_missing_file_is_ok_and_empty(self):
+        plugin = make_plugin()
+        ok, excl, var_entries, overrides = plugin._read_existing_config(
+            "/nonexistent/dam/config.json")
+        self.assertTrue(ok)
+        self.assertEqual(excl, set())
+        self.assertEqual(var_entries, [])
+        self.assertEqual(overrides, {})
+
+    def test_valid_file_extracts_all_sections(self):
+        plugin = make_plugin()
+        path = self._write(
+            '{\n'
+            '  "excluded_ids": [111, 222],\n'
+            '  "devices": [\n'
+            '    # comment line to strip\n'
+            '    {"id": 42, "state": "contact", "label": "My Door", "on_text": "SHUT"},\n'
+            '  ],\n'
+            '  "variables": [\n'
+            '    {"id": 241032502, "label": "Lux"},\n'
+            '  ]\n'
+            '}\n'
+        )
+        try:
+            ok, excl, var_entries, overrides = plugin._read_existing_config(path)
+        finally:
+            os.unlink(path)
+        self.assertTrue(ok)
+        self.assertEqual(excl, {111, 222})
+        self.assertEqual(var_entries, [{"id": 241032502, "label": "Lux"}])
+        self.assertIn((42, "contact"), overrides)
+        self.assertEqual(overrides[(42, "contact")]["label"], "My Door")
+
+    def test_corrupt_file_flags_not_ok(self):
+        plugin = make_plugin()
+        path = self._write("{ this is not json at all")
+        try:
+            ok, excl, var_entries, overrides = plugin._read_existing_config(path)
+        finally:
+            os.unlink(path)
+        self.assertFalse(ok)
+
+    def test_discovery_preserves_variables_and_aborts_on_corrupt(self):
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "dam_config.json")
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+        try:
+            plugin = make_plugin()
+
+            # 1. Existing config with a variables entry + an exclusion survives re-discovery.
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write('{"excluded_ids": [777], "devices": [],\n'
+                        ' "variables": [{"id": 241032502, "label": "Lux"}]}\n')
+            plugin.menuDiscoverDevices()
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn('"id": 241032502', content,
+                          msg=f"variables section lost on re-discovery:\n{content}")
+            self.assertIn("777", content.split('"excluded_ids"')[1].split("]")[0],
+                          msg="excluded_ids lost on re-discovery")
+
+            # 2. Corrupt existing config must NOT be overwritten.
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write("{ definitely broken json")
+            plugin.menuDiscoverDevices()
+            with open(config_path, encoding="utf-8") as f:
+                after = f.read()
+            self.assertEqual(after, "{ definitely broken json",
+                             msg="discovery clobbered an unreadable config file")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ======================================
 # ENTRY POINT
 # ======================================
 
