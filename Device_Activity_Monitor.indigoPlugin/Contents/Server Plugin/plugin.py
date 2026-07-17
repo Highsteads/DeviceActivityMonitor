@@ -4,7 +4,32 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Fable 5
 # Date:        17-07-2026
-# Version:     1.9.13
+# Version:     1.10.0
+#
+# v1.10.0 (17-07-2026) — deep-review FEATURE batch:
+# - New menu item "Test Fire All Group Triggers" — fires every enabled
+#   Group Changed trigger once so trigger actions can be verified without
+#   physically tripping a sensor.
+# - Discover Devices now applies the freshly-written config immediately
+#   (auto _load_config + validation) — no manual Reload Config File step.
+# - Manually-added ACTIVE entries that discovery does not re-emit (devices
+#   it classifies as neither contact nor motion) are preserved in a
+#   dedicated "Manually added entries" section — previously they were
+#   silently dropped on every re-discovery.
+# - Discovery flags excluded_ids entries whose devices no longer exist.
+# - deviceStartComm warns when a group's memberIds contains ids no longer
+#   in Indigo (stale members used to sit silently forever).
+# - New PluginConfig.xml exposing the three runtime toggles + debug
+#   logging for GUI-only users, applied immediately via
+#   closedPrefsConfigUi (previously showDebugInfo was read but nothing
+#   could ever set it).
+# - DEVICE_MONITOR / VARIABLE_MONITOR fallback dicts now ship EMPTY with
+#   example entries — the published plugin no longer carries the author's
+#   personal device ids (fresh installs start clean; the JSON config from
+#   discovery is the normal path). Test fixtures moved into test_plugin.py.
+# - Events.xml hint notes that members without an on/off state only fire
+#   "Any change".
+# - +7 feature tests -> 142.
 #
 # v1.9.13 (17-07-2026) — deep-review LOW batch:
 # - Startup validation logs ONE summary line instead of a per-device /
@@ -435,32 +460,12 @@ _EXCLUDED_PLUGIN_IDS = {
 # ======================================
 DEVICE_MONITOR = {
 
-    # --- Bathroom Basin ---
-    812537401:  [{"state": "onState",       "label": "Occupancy"}],
-    1976004986: [{"state": "pirDetection",  "label": "PIR"},
-                 {"state": "presence",      "label": "mmWave Presence"}],
-
-    # --- Bathroom Door ---
-    1184619127: [{"state": "onState",       "label": "Occupancy"}],
-    415253439:  [{"state": "onState",       "label": "Contact",
-                  "on_text": "OPEN",        "off_text": "CLOSED"}],
-
-    # --- Kitchen ---
-    1649680462: [{"state": "presence",      "label": "mmWave Presence"}],
-    1440351705: [{"state": "onState",       "label": "mmWave Presence"}],
-    467551931:  [{"state": "onState",       "label": "Occupancy"}],
-
-    # --- Living Room ---
-    408117572:  [{"state": "onState",       "label": "mmWave Presence"}],
-    1256890181: [{"state": "onState",       "label": "mmWave Presence"}],
-    1807623843: [{"state": "onState",       "label": "mmWave Presence"}],
-
-    # --- Window / Door Contacts ---
-    # Replace 0 with your actual Indigo device IDs.
-    # on_text / off_text customise the log label for True / False states.
-    # 0: [{"state": "onState", "label": "Front Door",  "on_text": "OPEN", "off_text": "CLOSED"}],
-    # 0: [{"state": "onState", "label": "Back Door",   "on_text": "OPEN", "off_text": "CLOSED"}],
-    # 0: [{"state": "onState", "label": "Lounge Window","on_text": "OPEN", "off_text": "CLOSED"}],
+    # Empty by default (v1.10.0) — run Plugins > Device Activity Monitor >
+    # Discover All Devices to generate the JSON config, or add entries here.
+    # Example entries (replace the 0 keys with your Indigo device IDs):
+    # 0: [{"state": "onState", "label": "Front Door",   "on_text": "OPEN", "off_text": "CLOSED"}],
+    # 0: [{"state": "onState", "label": "Hall Motion",  "on_text": "MOTION", "off_text": "CLEAR"}],
+    # 0: [{"state": "presence", "label": "mmWave Presence"}],
 }
 
 # ======================================
@@ -481,9 +486,11 @@ DEVICE_MONITOR = {
 # ======================================
 VARIABLE_MONITOR = {
 
-    # Variables log value changes as: [ts] Label: old_value -> new_value
-    # "label" is optional - defaults to variable name if omitted
-    241032502: {"label": "Lux Level"},
+    # Empty by default (v1.10.0). Variables log value changes as:
+    #   [ts] Label: old_value -> new_value
+    # "label" is optional - defaults to variable name if omitted.
+    # Example (replace 0 with your Indigo variable ID):
+    # 0: {"label": "Lux Level"},
 }
 
 
@@ -896,6 +903,16 @@ class Plugin(indigo.PluginBase):
         self.device_groups[dev.id] = {"name": dev.name, "members": members}
         self._rebuild_group_index()
         self._refresh_smgroup_states(dev, members)
+        # Surface stale member ids at group start (v1.10.0) — previously a
+        # deleted member sat silently in memberIds forever.
+        missing = [m for m in sorted(members) if m not in indigo.devices]
+        if missing:
+            self.logger.warning(
+                f"[Device Activity Monitor] Group '{dev.name}' has "
+                f"{len(missing)} member id(s) not found in Indigo: "
+                f"{', '.join(str(m) for m in missing)} - remove them via the "
+                f"group's ConfigUI"
+            )
 
     def deviceStopComm(self, dev):
         if dev.deviceTypeId != "damGroup":
@@ -1135,6 +1152,13 @@ class Plugin(indigo.PluginBase):
                 f"{ts}[Device Activity Monitor] Preserving {len(excluded_ids)} "
                 f"excluded device(s) from existing config"
             )
+            stale_excl = [x for x in sorted(excluded_ids) if x not in indigo.devices]
+            if stale_excl:
+                self.logger.info(
+                    f"{ts}[Device Activity Monitor] Note: {len(stale_excl)} excluded "
+                    f"id(s) no longer exist in Indigo and can be removed from "
+                    f"excluded_ids: {', '.join(str(x) for x in stale_excl)}"
+                )
         if var_entries:
             self.logger.info(
                 f"{ts}[Device Activity Monitor] Preserving {len(var_entries)} "
@@ -1238,6 +1262,10 @@ class Plugin(indigo.PluginBase):
             lines.append('  "devices": [')
             lines.append("")
 
+            # Track which (device, state) pairs discovery emits as ACTIVE so
+            # manually-added entries it does NOT re-emit can be preserved below.
+            emitted_pairs = set()
+
             # Active contact sensors - one entry per device
             if active_contacts:
                 lines.append("    # --- Contact / Door / Window sensors (active) ---")
@@ -1245,6 +1273,8 @@ class Plugin(indigo.PluginBase):
                     dev_obj = self._dev_or_none(d["id"])
                     if dev_obj is None:
                         continue
+                    emitted_pairs.add(
+                        (dev_obj.id, "contact" if "contact" in d["states"] else "onState"))
                     lines.append(
                         self._disc_config_entry(dev_obj, d["states"], commented=False,
                                                 overrides_map=device_overrides) + ","
@@ -1260,10 +1290,23 @@ class Plugin(indigo.PluginBase):
                         continue
                     mot_states = self._disc_motion_states(d["states"])
                     for state_name in mot_states:
+                        emitted_pairs.add((dev_obj.id, state_name))
                         lines.append(
                             self._disc_motion_entry(dev_obj, state_name, commented=False,
                                                     overrides_map=device_overrides) + ","
                         )
+                lines.append("")
+
+            # Manually-added ACTIVE entries that discovery did not re-emit
+            # (devices it classifies as neither contact nor motion, or that
+            # its filters skip). A hand-added entry must survive re-discovery.
+            # Entries for devices in excluded_ids are not resurrected.
+            manual = [entry for pair, entry in sorted(device_overrides.items())
+                      if pair not in emitted_pairs and pair[0] not in excluded_ids]
+            if manual:
+                lines.append("    # --- Manually added entries (preserved across re-discovery) ---")
+                for entry in manual:
+                    lines.append("    " + json.dumps(entry) + ",")
                 lines.append("")
 
             # Excluded sensors - written commented-out, preserved across re-discovery
@@ -1349,6 +1392,20 @@ class Plugin(indigo.PluginBase):
             f"{ts}Reload to apply: Plugins > Device Activity Monitor > Reload Config File"
         )
 
+        # Apply the freshly-written config immediately (v1.10.0) — the file
+        # written above is the new source of truth, and user customisations
+        # were preserved into it, so requiring a manual reload only invited
+        # drift between file and runtime.
+        self._load_config()
+        self._validate_monitored_devices()
+        self._validate_monitored_variables()
+        self.logger.info(
+            f"{ts}[Device Activity Monitor] Config reloaded automatically - "
+            f"monitoring is live ({len(self.device_monitor)} devices, "
+            f"{len(self.variable_monitor)} variables). Edit the file and use "
+            f"Reload Config File to adjust."
+        )
+
     def menuFindContactSensors(self):
         """Log all contact/door/window and motion/occupancy sensor candidates."""
         ts = self._ts()
@@ -1403,6 +1460,31 @@ class Plugin(indigo.PluginBase):
                         self.logger.info(f"{ts}  {entry}")
 
         self.logger.info(f"{ts}=== End of Discovery ===")
+
+    def menuTestFireGroupTriggers(self):
+        """Fire every registered damGroupChange trigger once so users can
+        verify their trigger actions without physically tripping a sensor."""
+        ts = self._ts()
+        fired = 0
+        for trigger in self.event_triggers.values():
+            if trigger.pluginTypeId != "damGroupChange":
+                continue
+            try:
+                indigo.trigger.execute(trigger)
+                fired += 1
+                self.logger.info(
+                    f"{ts}[Device Activity Monitor] TEST-FIRED trigger '{trigger.name}'"
+                )
+            except Exception as exc:
+                self.logger.error(
+                    f"[Device Activity Monitor] test-fire of "
+                    f"'{getattr(trigger, 'name', '?')}' failed: {exc}"
+                )
+        if not fired:
+            self.logger.info(
+                f"{ts}[Device Activity Monitor] No enabled Group Changed "
+                f"triggers to test-fire"
+            )
 
     def menuReloadConfig(self):
         """Reload device_activity_monitor_config.json without a full plugin restart.
@@ -1991,6 +2073,17 @@ class Plugin(indigo.PluginBase):
             indigo.server.log(f"{self.pluginDisplayName} v{self.pluginVersion}")
             for label, value in extras:
                 indigo.server.log(f"  {label} {value}")
+
+    def closedPrefsConfigUi(self, valuesDict, userCancelled):
+        """Apply PluginConfig changes immediately (v1.10.0) — mirrors the
+        __init__ pref reads so the dialog and the toggle menu items stay in
+        step. Checkbox values arrive as real bools."""
+        if userCancelled:
+            return
+        self.debug             = bool(valuesDict.get("showDebugInfo", False))
+        self.log_enabled       = bool(valuesDict.get("logEnabled",       True))
+        self.group_enabled     = bool(valuesDict.get("groupEnabled",     True))
+        self.timestamp_enabled = bool(valuesDict.get("timestampEnabled", True))
 
     # ----- toggle helpers -----
     def _set_flag(self, pref_key, attr_name, label):

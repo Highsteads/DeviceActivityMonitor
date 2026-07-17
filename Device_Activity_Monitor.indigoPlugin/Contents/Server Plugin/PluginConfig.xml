@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PluginConfig>
+
+    <Field id="infoLabel" type="label" fontSize="small">
+        <Label>Runtime behaviour. The three toggles below are also available as menu items (Plugins > Device Activity Monitor) for quick flips without opening this dialog.</Label>
+    </Field>
+
+    <Field id="logEnabled" type="checkbox" defaultValue="true">
+        <Label>Device change log:</Label>
+        <Description>Write monitored device and variable changes to the event log</Description>
+    </Field>
+
+    <Field id="groupEnabled" type="checkbox" defaultValue="true">
+        <Label>Group change triggers:</Label>
+        <Description>Fire Group Changed triggers when group members change</Description>
+    </Field>
+
+    <Field id="timestampEnabled" type="checkbox" defaultValue="true">
+        <Label>Timestamps in log:</Label>
+        <Description>Prefix plugin log lines with [HH:MM:SS.mmm]</Description>
+    </Field>
+
+    <Field id="sepDebug" type="separator"/>
+
+    <Field id="showDebugInfo" type="checkbox" defaultValue="false">
+        <Label>Enable debug logging:</Label>
+        <Description>Verbose logging for troubleshooting</Description>
+    </Field>
+
+</PluginConfig>

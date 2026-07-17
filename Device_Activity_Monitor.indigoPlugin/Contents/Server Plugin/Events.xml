@@ -29,7 +29,7 @@
                 </List>
             </Field>
             <Field id="fireOnHint" type="label" fontColor="darkgray" fontSize="small" alignWithControl="true">
-                <Label>"Any change" fires on every meaningful state update (housekeeping states such as lastSeen and link quality are ignored). The directional options fire only on an onState transition.</Label>
+                <Label>"Any change" fires on every meaningful state update (housekeeping states such as lastSeen and link quality are ignored). The directional options fire only on an onState transition, so group members without an on/off state can only fire "Any change".</Label>
             </Field>
             <Field id="saveBool" type="checkbox" defaultValue="false">
                 <Label>Save firing device:</Label>

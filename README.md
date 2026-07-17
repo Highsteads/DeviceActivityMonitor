@@ -1,6 +1,6 @@
 # Device Activity Monitor — Indigo Plugin
 
-**Version**: 1.9.0
+**Version**: 1.10.0
 **Author**: CliveS
 **Platform**: Indigo 2022.1 or later / macOS / Python 3.10+
 
@@ -9,8 +9,23 @@
 **GitHub**: <https://github.com/Highsteads/DeviceActivityMonitor>
 
 > v1.9.0 renamed this plugin from **Sensor Monitor** → **Device Activity Monitor**.
-> Same lineage; the new name better describes both halves of what it now does:
+> Same lineage — the new name better describes both halves of what it now does:
 > per-device change **logging** and group-change custom **triggers**.
+
+## What's new in 1.10.x
+
+The 1.9.11 → 1.10.0 releases are the result of a full deep review of the plugin.
+The headline fixes: editing a group's members now takes effect immediately (it
+used to silently wait for a plugin restart), group triggers no longer double-fire
+on Zigbee2MQTT duplicate publishes or radio housekeeping updates, one typo in a
+hand-edited config can no longer stop the plugin loading, and re-running
+discovery now preserves your variables, custom labels and manually added
+entries instead of quietly resetting them. New in 1.10.0: a **Test Fire All
+Group Triggers** menu item so you can check your trigger actions without
+walking round the house waving at sensors, a Configure dialog for the runtime
+toggles, discovery that applies its results immediately, and warnings when a
+group still references a deleted device. The test suite has grown from 104 to
+143 checks along the way.
 
 ---
 
@@ -80,8 +95,9 @@ trigger group.
 3. **Plugins → Manage Plugins** → enable **Device Activity Monitor**
 4. The plugin auto-creates its config folder at
    `<install>/Preferences/Plugins/com.clives.indigoplugin.deviceactivitymonitor/`
-5. Open the Indigo Event Log — you should see the startup banner and the loaded
-   device count
+5. Open the Indigo Event Log — you should see a one-line startup summary with
+   the loaded device count (the full diagnostic banner is available on demand
+   via **Plugins → Device Activity Monitor → Show Plugin Info**)
 
 ---
 
@@ -299,7 +315,7 @@ attribute before and after the change.
 
 | Option | Fires when… |
 |--------|-------------|
-| **Any change** (default) | *Any* state on a group member changes — including non-onState states like temperature readings or battery level. Use sparingly with chatty sensors |
+| **Any change** (default) | Any *meaningful* state on a group member changes. Housekeeping states (`lastSeen`, link quality, battery, RSSI) are ignored as of v1.9.12, so duplicate radio publishes and signal-strength churn no longer fire it |
 | **Any device becomes ON / OPEN / detected** | A member's `onState` flips from `False` to `True`. Edge-triggered: doesn't re-fire while it stays on. Use for occupancy, door-opens, alarms |
 | **Any device becomes OFF / CLOSED / clear** | A member's `onState` flips from `True` to `False`. Edge-triggered: doesn't re-fire while it stays off. Use for "last sensor cleared" timers, door closes |
 
@@ -392,16 +408,20 @@ Under **Plugins → Device Activity Monitor**:
 
 | Item | What it does |
 |------|--------------|
-| **Discover All Devices (generate config file)** | Scans every Indigo device, classifies contact / motion / presence candidates using device type, Zigbee2MQTT capability flags, and name keywords. Writes `device_discovery.json` (full inventory) and a fresh `device_activity_monitor_config.json` (sensor candidates active, all others commented out for reference). Preserves `excluded_ids` across re-runs |
+| **Discover All Devices (generate config file)** | Scans every Indigo device, classifies contact / motion / presence candidates using device type, Zigbee2MQTT capability flags, and name keywords. Writes `device_discovery.json` (full inventory) and a fresh `device_activity_monitor_config.json`, then applies it immediately. Preserves `excluded_ids`, your variables section, custom labels and manually added entries across re-runs, and refuses to overwrite a config file it cannot parse |
 | **Find Contact & Motion Sensors** | One-shot log dump of all sensor candidates with ready-to-paste config entries — useful for a quick check without regenerating the whole config |
 | **Reload Config File** | Re-reads the JSON and re-validates without a full plugin restart. Use after editing the config file by hand |
+| **Test Fire All Group Triggers** | Fires every enabled Group Changed trigger once so you can verify the wired-up actions without physically tripping a sensor |
 | **Toggle Device Change Log (on/off)** | Flips per-device / per-variable event-log lines on or off. When OFF the plugin still subscribes to changes (group triggers keep working) but writes nothing to the event log |
 | **Toggle Group Change Triggers (on/off)** | Flips group-device-driven custom triggers on or off. When OFF, `damGroup` device changes no longer fire `damGroupChange` events even if matching triggers are enabled |
 | **Toggle Timestamps in Log (on/off)** | Strips or restores the `[HH:MM:SS.mmm]` prefix on every line the plugin writes to the event log. Indigo's own column timestamp is unaffected |
 | **Show Plugin Info** | Prints the startup banner on demand, including current state of the three toggles above |
 
 All three toggles persist across plugin restarts (stored in `pluginPrefs` as
-`logEnabled` / `groupEnabled` / `timestampEnabled`) and default ON.
+`logEnabled` / `groupEnabled` / `timestampEnabled`) and default ON. As of
+v1.10.0 they are also available in the standard Configure dialog
+(**Plugins → Device Activity Monitor → Configure**), alongside a debug-logging
+checkbox — changes apply immediately on save.
 
 ---
 
@@ -420,14 +440,20 @@ have:
 4. **State-name match**: `contact` / `doorSensor` / `windowSensor` → contact;
    `occupancy` / `pirDetection` / `presence` / `motion` / `motionDetected`
    → motion
-5. **Name-keyword match**: `contact`, `door`, `window`, etc.
+5. **Name-keyword match**: `contact`, `door`, `window`, etc. — gated on the
+   device's Indigo class, so actuators (relays, dimmers, locks, thermostats)
+   are never classified as sensors by name alone. "Front Door Lock" stays a
+   lock
 
 To **permanently exclude** a device from discovery output, add its ID to the
 `excluded_ids` array in the config file. Subsequent re-discovery runs will
-respect the exclusion and leave that device commented out.
+respect the exclusion and leave that device commented out. Discovery also
+flags any excluded ids whose devices no longer exist so the list stays clean.
 
 To **add a sensor that discovery missed**, just add a line manually to
-`devices[]` — discovery never deletes manually-added entries.
+`devices[]` — re-discovery keeps it in a dedicated "Manually added entries"
+section, along with any custom labels or on/off text you have set on the
+generated entries.
 
 ---
 
@@ -474,10 +500,9 @@ Device_Activity_Monitor.indigoPlugin/
 │       ├── Devices.xml                     ← damGroup device type
 │       ├── Events.xml                      ← Group Changed trigger
 │       ├── MenuItems.xml                   ← Plugins menu
-│       ├── plugin_utils.py                 ← startup banner helper
-│       ├── discover_devices.py             ← standalone Script Editor discovery
-│       ├── find_contact_sensors.py         ← standalone Script Editor sensor finder
-│       ├── test_plugin.py                  ← 86 tests, runs without Indigo
+│       ├── PluginConfig.xml                ← runtime toggles + debug logging
+│       ├── plugin_utils.py                 ← on-demand info banner helper
+│       ├── test_plugin.py                  ← 143 tests, runs without Indigo
 │       └── IndigoSecrets_example.py        ← credential template (unused — ecosystem standard)
 ```
 
@@ -506,6 +531,14 @@ this section exists only for completeness if I ever do a clean reinstall.)
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.10.0  | 2026-07-17 | Deep-review feature batch — Test Fire All Group Triggers menu item, discovery applies its results immediately and preserves manually added entries, Configure dialog for the runtime toggles, stale group-member and stale-exclusion warnings, fallback config now ships empty |
+| 1.9.13  | 2026-07-17 | Deep-review polish — one-line startup validation summary, deletion warnings always shown (and now cover group members), duplicate config entries skipped, triggers can no longer be saved without a group, timestamp toggle honoured on menu output |
+| 1.9.12  | 2026-07-17 | Deep-review robustness — group triggers ignore housekeeping-state churn (no more double-fires on Zigbee2MQTT duplicate publishes), one failing trigger no longer blocks the rest, atomic config writes, toggle flips survive a crash, locks/relays no longer offered as sensors by name |
+| 1.9.11  | 2026-07-17 | Deep-review fixes — group membership edits apply immediately (previously needed a plugin restart), a config typo can no longer stop the plugin loading, device names with quotes no longer corrupt the generated config, re-discovery preserves your variables and custom labels |
+| 1.9.10  | 2026-06-12 | Discovery recognises Matter (indigo-matter) presence and contact sensors |
+| 1.9.9   | 2026-06-10 | Fleet audit — lint cleanup and CI gate |
+| 1.9.8   | 2026-06-05 | Estate bug-sweep — guarded config id parse, merged duplicate deviceDeleted |
+| 1.9.7   | 2026-06-04 | Millisecond-precision timestamps on menu and discovery output |
 | 1.9.5   | 2026-05-23 | Three runtime toggle menu items — Device Change Log, Group Change Triggers, Timestamps in Log. Each is independent, persists across restarts, defaults ON |
 | 1.9.4   | 2026-05-14 | Discovery correctly classifies multi-capability Aqara presence sensors (PS-S04D, FP1 etc.) using `pirDetection` / `presenceDetectionOptions` state names |
 | 1.9.3   | 2026-05-13 | Added `on_value` / `off_value` config keys for explicit value matching on string-typed states (e.g. presenceEvent `enter`/`leave`) |

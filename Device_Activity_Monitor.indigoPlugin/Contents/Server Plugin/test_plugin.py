@@ -136,10 +136,41 @@ _spec        = importlib.util.spec_from_file_location("sensor_monitor_plugin", _
 _mod         = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
-Plugin           = _mod.Plugin
-DEVICE_MONITOR   = _mod.DEVICE_MONITOR
-VARIABLE_MONITOR = _mod.VARIABLE_MONITOR
-CONFIG_PATH      = _mod.CONFIG_PATH
+Plugin      = _mod.Plugin
+CONFIG_PATH = _mod.CONFIG_PATH
+
+# ======================================
+# TEST FIXTURE MONITOR DICTS
+#
+# As of v1.10.0 the plugin's module-level fallback dicts ship EMPTY (a
+# published plugin must not carry the author's personal device ids), so the
+# standard test fixtures live HERE and make_plugin() injects deep copies
+# after construction. The ids/states match the pre-v1.10.0 shipped dicts so
+# every existing test keeps its device vocabulary.
+# ======================================
+
+DEVICE_MONITOR = {
+    # --- Bathroom Basin ---
+    812537401:  [{"state": "onState",       "label": "Occupancy"}],
+    1976004986: [{"state": "pirDetection",  "label": "PIR"},
+                 {"state": "presence",      "label": "mmWave Presence"}],
+    # --- Bathroom Door ---
+    1184619127: [{"state": "onState",       "label": "Occupancy"}],
+    415253439:  [{"state": "onState",       "label": "Contact",
+                  "on_text": "OPEN",        "off_text": "CLOSED"}],
+    # --- Kitchen ---
+    1649680462: [{"state": "presence",      "label": "mmWave Presence"}],
+    1440351705: [{"state": "onState",       "label": "mmWave Presence"}],
+    467551931:  [{"state": "onState",       "label": "Occupancy"}],
+    # --- Living Room ---
+    408117572:  [{"state": "onState",       "label": "mmWave Presence"}],
+    1256890181: [{"state": "onState",       "label": "mmWave Presence"}],
+    1807623843: [{"state": "onState",       "label": "mmWave Presence"}],
+}
+
+VARIABLE_MONITOR = {
+    241032502: {"label": "Lux Level"},
+}
 
 # Redirect file paths to non-existent locations so tests never touch real
 # config/discovery files that may be present on the system.
@@ -194,18 +225,25 @@ def make_variable_registry(missing_ids=None):
 
 
 def make_plugin(prefs=None):
-    """Instantiate the Plugin class with minimal prefs.
+    """Instantiate the Plugin class with minimal prefs and inject the test
+    fixture monitor dicts.
 
-    No config file is present in the test environment, so _load_config()
-    falls back to the module-level DEVICE_MONITOR / VARIABLE_MONITOR dicts.
-    Call plugin._load_config(path) afterwards to test file-based loading.
+    The plugin's module-level fallback dicts are EMPTY as of v1.10.0, so
+    the fixtures defined above are copied onto the instance here.
+    Call plugin._load_config(path) afterwards to test file-based loading
+    (it fully replaces the injected fixtures).
     """
-    return Plugin(
+    plugin = Plugin(
         "com.clives.indigoplugin.deviceactivitymonitor",
         "Device Activity Monitor",
-        "1.9.13",
+        "1.10.0",
         prefs or {}
     )
+    plugin.device_monitor   = {k: [dict(s) for s in v]
+                               for k, v in DEVICE_MONITOR.items()}
+    plugin.variable_monitor = {k: dict(v)
+                               for k, v in VARIABLE_MONITOR.items()}
+    return plugin
 
 
 def server_log_messages():
@@ -756,25 +794,26 @@ class TestConfigLoading(unittest.TestCase):
     # --- Fallback behaviour ---
 
     def test_fallback_when_no_file(self):
-        """When no config file exists, falls back to DEVICE_MONITOR / VARIABLE_MONITOR."""
-        plugin = make_plugin()
-        # No file at default path - plugin should mirror the module-level dicts
-        self.assertEqual(
-            set(plugin.device_monitor.keys()),
-            set(DEVICE_MONITOR.keys()),
-            msg="device_monitor keys should match DEVICE_MONITOR fallback"
-        )
-        self.assertEqual(
-            set(plugin.variable_monitor.keys()),
-            set(VARIABLE_MONITOR.keys()),
-            msg="variable_monitor keys should match VARIABLE_MONITOR fallback"
-        )
+        """CONTRACT (v1.10.0): with no config file the module-level fallback
+        dicts apply, and they now ship EMPTY — a published plugin must not
+        carry the author's personal device ids. (Tests get their fixtures
+        injected by make_plugin instead.)"""
+        plugin = Plugin("com.clives.indigoplugin.deviceactivitymonitor",
+                        "Device Activity Monitor", "1.10.0", {})
+        self.assertEqual(plugin.device_monitor, {},
+            msg="shipped fallback DEVICE_MONITOR must be empty")
+        self.assertEqual(plugin.variable_monitor, {},
+            msg="shipped fallback VARIABLE_MONITOR must be empty")
+        self.assertEqual(_mod.DEVICE_MONITOR, {})
+        self.assertEqual(_mod.VARIABLE_MONITOR, {})
 
     def test_fallback_is_deep_copy(self):
-        """Fallback dicts are independent copies - mutating one does not affect the other."""
-        plugin = make_plugin()
+        """Fallback dicts are independent copies - mutating the instance dict
+        does not affect the module-level dict."""
+        plugin = Plugin("com.clives.indigoplugin.deviceactivitymonitor",
+                        "Device Activity Monitor", "1.10.0", {})
         plugin.device_monitor[999999999] = [{"state": "onState", "label": "Test"}]
-        self.assertNotIn(999999999, DEVICE_MONITOR,
+        self.assertNotIn(999999999, _mod.DEVICE_MONITOR,
             msg="Mutating device_monitor should not alter module-level DEVICE_MONITOR")
 
     # --- Device loading ---
@@ -987,16 +1026,17 @@ class TestConfigLoading(unittest.TestCase):
     # --- Error resilience ---
 
     def test_invalid_json_falls_back_to_defaults(self):
-        """Malformed JSON causes fallback to DEVICE_MONITOR / VARIABLE_MONITOR."""
+        """Malformed JSON falls back to the module-level dicts (empty as of
+        v1.10.0) with a warning — it must not keep the previous config or
+        raise."""
         path   = self._write_config("{ this is not valid json }")
         plugin = make_plugin()
         plugin._load_config(path)
 
-        # Should fall back silently
         self.assertEqual(
             set(plugin.device_monitor.keys()),
-            set(DEVICE_MONITOR.keys()),
-            msg="Invalid JSON should trigger fallback to DEVICE_MONITOR"
+            set(_mod.DEVICE_MONITOR.keys()),
+            msg="Invalid JSON should fall back to the module-level dicts"
         )
 
 
@@ -2170,6 +2210,145 @@ class TestDeletionWarnings(unittest.TestCase):
         warn_text = " ".join(str(c) for c in plugin.logger.warning.call_args_list)
         self.assertIn("Bathroom Sensors", warn_text)
         self.assertIn("777", warn_text)
+
+
+# ======================================
+# v1.10.0 FEATURE TESTS
+# ======================================
+
+
+class TestTestFireMenu(unittest.TestCase):
+    """v1.10.0: Test Fire All Group Triggers menu item fires every registered
+    damGroupChange trigger once, isolating per-trigger failures."""
+
+    def test_fires_each_registered_trigger(self):
+        plugin = make_plugin()
+        mock_indigo.trigger.execute.reset_mock()
+        for trig_id in (1, 2):
+            trigger = MagicMock()
+            trigger.id           = trig_id
+            trigger.pluginTypeId = "damGroupChange"
+            trigger.name         = f"T{trig_id}"
+            trigger.pluginProps  = {"groupDevice": "1", "fireOn": "any"}
+            plugin.event_triggers[trig_id] = trigger
+        plugin.menuTestFireGroupTriggers()
+        self.assertEqual(mock_indigo.trigger.execute.call_count, 2)
+
+    def test_no_triggers_logs_not_errors(self):
+        plugin = make_plugin()
+        mock_indigo.trigger.execute.reset_mock()
+        plugin.menuTestFireGroupTriggers()
+        mock_indigo.trigger.execute.assert_not_called()
+        plugin.logger.error.assert_not_called()
+
+
+class TestClosedPrefsConfigUi(unittest.TestCase):
+    """v1.10.0: PluginConfig saves apply immediately, mirroring __init__."""
+
+    def test_applies_new_values(self):
+        plugin = make_plugin(prefs={"logEnabled": True, "groupEnabled": True,
+                                    "timestampEnabled": True})
+        plugin.closedPrefsConfigUi(
+            {"logEnabled": False, "groupEnabled": False,
+             "timestampEnabled": False, "showDebugInfo": True}, False)
+        self.assertFalse(plugin.log_enabled)
+        self.assertFalse(plugin.group_enabled)
+        self.assertFalse(plugin.timestamp_enabled)
+        self.assertTrue(plugin.debug)
+
+    def test_cancel_changes_nothing(self):
+        plugin = make_plugin(prefs={"logEnabled": True})
+        plugin.closedPrefsConfigUi({"logEnabled": False}, True)
+        self.assertTrue(plugin.log_enabled)
+
+
+class TestGroupMemberValidation(unittest.TestCase):
+    """v1.10.0: deviceStartComm warns when a group's memberIds contains ids
+    that no longer exist in Indigo."""
+
+    def test_missing_member_warns(self):
+        plugin = make_plugin()
+        mock_indigo.devices = make_device_registry()   # fixture devices only
+        grp = MockDevice(4242, "My Group", device_type_id="damGroup")
+        grp.pluginProps = {"memberIds": "812537401,999999999"}
+        grp.updateStatesOnServer = MagicMock()
+        plugin.deviceStartComm(grp)
+        warn_text = " ".join(str(c) for c in plugin.logger.warning.call_args_list)
+        self.assertIn("999999999", warn_text)
+        self.assertNotIn("812537401", warn_text)
+
+    def test_all_members_present_no_warning(self):
+        plugin = make_plugin()
+        mock_indigo.devices = make_device_registry()
+        grp = MockDevice(4242, "My Group", device_type_id="damGroup")
+        grp.pluginProps = {"memberIds": "812537401"}
+        grp.updateStatesOnServer = MagicMock()
+        plugin.deviceStartComm(grp)
+        plugin.logger.warning.assert_not_called()
+
+
+class TestDiscoveryAutoReload(unittest.TestCase):
+    """v1.10.0: Discover Devices applies the freshly-written config
+    immediately instead of requiring a manual Reload Config File."""
+
+    def test_discovery_reloads_written_config(self):
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = os.path.join(tmpdir, "dam_config.json")
+        try:
+            mock_indigo.devices = MockDevices()
+            sensor = MockDevice(31337, "Porch Door Sensor", on_state=False)
+            mock_indigo.devices[31337] = sensor
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+            self.assertIn(31337, plugin.device_monitor,
+                msg="discovered sensor should be live immediately after discovery")
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestManualEntryPreservation(unittest.TestCase):
+    """v1.10.0: a hand-added ACTIVE config entry for a device discovery does
+    NOT classify (neither contact nor motion) survives re-discovery in the
+    'Manually added entries' section — previously it was silently dropped."""
+
+    def test_manual_entry_survives_rediscovery(self):
+        import shutil
+        tmpdir      = tempfile.mkdtemp()
+        config_path = os.path.join(tmpdir, "dam_config.json")
+        orig_disc   = _mod.DISCOVERY_OUTPUT_PATH
+        orig_config = _mod.CONFIG_PATH
+        _mod.DISCOVERY_OUTPUT_PATH = os.path.join(tmpdir, "device_discovery.json")
+        _mod.CONFIG_PATH           = config_path
+        try:
+            # A thermostat-ish device discovery won't classify, plus a manual
+            # entry for it in the existing config.
+            mock_indigo.devices = MockDevices()
+            odd = MockDevice(88888, "Boiler Flow Meter", on_state=False,
+                             states={"sensorValue": 1.5})
+            mock_indigo.devices[88888] = odd
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write('{"excluded_ids": [], "devices": [\n'
+                        ' {"id": 88888, "state": "sensorValue", "label": "Boiler Flow"}\n'
+                        '], "variables": []}\n')
+            plugin = make_plugin()
+            plugin.menuDiscoverDevices()
+            with open(config_path, encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("Manually added entries", content,
+                          msg=f"manual section missing:\n{content}")
+            self.assertIn('"id": 88888', content)
+            # And it is live after the auto-reload.
+            self.assertIn(88888, plugin.device_monitor)
+        finally:
+            _mod.DISCOVERY_OUTPUT_PATH = orig_disc
+            _mod.CONFIG_PATH           = orig_config
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ======================================
