@@ -5,10 +5,9 @@
          Device Activity Monitor Group (damGroup)
          Each device represents a named group of Indigo devices whose
          state changes should fire a "Device Activity Monitor: Group Changed"
-         trigger.  Replaces the JSON groups[] array as of v1.8.0 — JSON
-         groups still load for backward compatibility, but new groups
-         should be created as damGroup devices via the standard Indigo
-         "New Device" flow.
+         trigger.  damGroup devices are the ONLY source of groups (the
+         legacy JSON groups[] array was removed in v1.8.1) — create them
+         via the standard Indigo "New Device" flow.
 
          ConfigUI uses the two-list "Available / Members" pattern with
          folder filtering — Indigo has no native checkbox-list widget,

@@ -4,11 +4,11 @@
     <!-- ============================================================
          Group Change Listener
          Fires whenever any device in the selected Device Activity Monitor Group
-         has a state change.  As of v1.8.0, groups are first-class Indigo
-         devices (type damGroup) created via Indigo Devices > New Device.
-         Pre-v1.8.0 triggers configured by group name still work — the
-         plugin falls back to the JSON groups[] array when no
-         groupDevice is set.
+         has a state change.  Groups are first-class Indigo devices (type
+         damGroup) created via Indigo Devices > New Device — the legacy
+         JSON groups[] fallback was removed in v1.8.1, so every trigger
+         must have a groupDevice selected (validateEventConfigUi enforces
+         this as of v1.9.13).
          ============================================================ -->
     <Event id="damGroupChange">
         <Name>Device Activity Monitor: Group Changed</Name>
@@ -29,7 +29,7 @@
                 </List>
             </Field>
             <Field id="fireOnHint" type="label" fontColor="darkgray" fontSize="small" alignWithControl="true">
-                <Label>"Any change" fires on every state update. The directional options fire only on an onState transition.</Label>
+                <Label>"Any change" fires on every meaningful state update (housekeeping states such as lastSeen and link quality are ignored). The directional options fire only on an onState transition.</Label>
             </Field>
             <Field id="saveBool" type="checkbox" defaultValue="false">
                 <Label>Save firing device:</Label>

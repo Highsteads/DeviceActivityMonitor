@@ -1,14 +1,14 @@
 #! /usr/bin/env python
 # -*- coding: utf-8 -*-
 # Filename:    test_plugin.py
-# Description: Mock test harness for Sensor Monitor plugin - no Indigo runtime needed
-# Author:      CliveS & Claude Sonnet 4.6
-# Date:        27-02-2026
-# Version:     1.12
+# Description: Mock test harness for Device Activity Monitor plugin - no Indigo runtime needed
+# Author:      CliveS & Claude Fable 5
+# Date:        17-07-2026
+# Version:     1.13
 #
-# Run from Terminal:
-#   cd "/Library/Application Support/Perceptive Automation/Indigo 2025.1/Plugins"
-#   cd "Sensor_Monitor.indigoPlugin/Contents/Server Plugin"
+# Run from Terminal (path follows the installed Indigo version):
+#   cd "/Library/Application Support/Perceptive Automation/Indigo "*/Plugins
+#   cd "Device_Activity_Monitor.indigoPlugin/Contents/Server Plugin"
 #   python3 test_plugin.py -v
 
 import sys
@@ -201,9 +201,9 @@ def make_plugin(prefs=None):
     Call plugin._load_config(path) afterwards to test file-based loading.
     """
     return Plugin(
-        "com.clives.indigoplugin.sensormonitor",
-        "Sensor Monitor",
-        "1.4.0",
+        "com.clives.indigoplugin.deviceactivitymonitor",
+        "Device Activity Monitor",
+        "1.9.13",
         prefs or {}
     )
 
@@ -224,21 +224,19 @@ class TestStartupValidation(unittest.TestCase):
         mock_indigo.devices   = make_device_registry()
         mock_indigo.variables = make_variable_registry()
 
-    def test_all_devices_found_logs_ok_for_each(self):
-        """startup() logs [OK] for every monitored device when all exist."""
+    def test_all_devices_found_logs_summary_not_per_device(self):
+        """CONTRACT FLIP (v1.9.13): startup validation logs ONE summary line,
+        not a per-device [OK] line. Rationale: trimmed-boot convention (Jay,
+        25-May-2026) — dozens of [OK] lines buried the stale-id warnings
+        that are the whole point of validation."""
         plugin = make_plugin()
         plugin.startup()
 
-        info_calls     = [str(c) for c in plugin.logger.info.call_args_list]
-        device_id_strs = [str(dev_id) for dev_id in DEVICE_MONITOR]
-        ok_count       = sum(
-            1 for c in info_calls
-            if "[OK]" in c and any(did in c for did in device_id_strs)
-        )
+        info_calls = [str(c) for c in plugin.logger.info.call_args_list]
+        ok_count   = sum(1 for c in info_calls if "[OK]" in c)
 
-        self.assertEqual(ok_count, len(DEVICE_MONITOR),
-            msg=f"Expected {len(DEVICE_MONITOR)} device [OK] entries, got {ok_count}.\n"
-                f"Info calls: {info_calls}")
+        self.assertEqual(ok_count, 0,
+            msg=f"Per-device [OK] boot lines should be gone.\nInfo calls: {info_calls}")
 
     def test_all_devices_found_logs_final_ok(self):
         """startup() logs 'All monitored devices validated OK' when nothing missing."""
@@ -594,18 +592,18 @@ class TestVariableStartupValidation(unittest.TestCase):
         mock_indigo.devices   = make_device_registry()
         mock_indigo.variables = make_variable_registry()
 
-    def test_all_variables_found_logs_ok(self):
-        """startup() logs [OK] for every monitored variable when all exist."""
+    def test_all_variables_found_logs_summary_not_per_variable(self):
+        """CONTRACT FLIP (v1.9.13): variable validation logs one summary line,
+        no per-variable [OK] lines (trimmed-boot convention — see the device
+        validation test of the same name for the rationale)."""
         plugin = make_plugin()
         plugin.startup()
 
         info_calls = [str(c) for c in plugin.logger.info.call_args_list]
         ok_count   = sum(1 for c in info_calls if "[OK]" in c)
 
-        # ok_count covers both devices and variables
-        expected = len(DEVICE_MONITOR) + len(VARIABLE_MONITOR)
-        self.assertEqual(ok_count, expected,
-            msg=f"Expected {expected} [OK] entries, got {ok_count}.\nInfo: {info_calls}")
+        self.assertEqual(ok_count, 0,
+            msg=f"Per-entry [OK] boot lines should be gone.\nInfo: {info_calls}")
 
     def test_all_variables_found_logs_final_ok(self):
         """startup() logs 'All monitored variables validated OK' when none missing."""
@@ -1413,13 +1411,14 @@ class TestMenuCallbacks(unittest.TestCase):
             msg="Reload log should contain 'old -> new' counts")
 
     def test_menu_reload_config_reruns_validation(self):
-        """menuReloadConfig re-validates devices (logs [OK] entries)."""
+        """menuReloadConfig re-validates devices (summary line as of the
+        v1.9.13 trimmed-boot contract — per-device [OK] lines are gone)."""
         plugin = make_plugin()
         plugin.logger.info.reset_mock()
         plugin.menuReloadConfig()
 
         info_text = " ".join(str(c) for c in plugin.logger.info.call_args_list)
-        self.assertIn("[OK]", info_text,
+        self.assertIn("validated OK", info_text,
             msg="menuReloadConfig should re-run device validation")
 
     # --- menuFindContactSensors ---
@@ -2090,11 +2089,95 @@ class TestToggleFlush(unittest.TestCase):
 
 
 # ======================================
+# v1.9.13 DEEP-REVIEW REGRESSION TESTS
+# ======================================
+
+
+class TestConfigDedupe(unittest.TestCase):
+    """v1.9.13 regression: duplicate (device, state) config entries are
+    skipped with a warning — duplicates used to double-log every change."""
+
+    def test_duplicate_pair_skipped(self):
+        plugin = make_plugin()
+        cfg = {"devices": [
+            {"id": 42, "state": "contact", "label": "First"},
+            {"id": 42, "state": "contact", "label": "Second (dupe)"},
+            {"id": 42, "state": "onState", "label": "Different state - kept"},
+        ], "variables": []}
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(cfg, f)
+            plugin._load_config(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(len(plugin.device_monitor[42]), 2)
+        labels = [c["label"] for c in plugin.device_monitor[42]]
+        self.assertIn("First", labels)
+        self.assertNotIn("Second (dupe)", labels)
+
+
+class TestValidateEventConfigUi(unittest.TestCase):
+    """v1.9.13: a damGroupChange trigger can no longer be saved without a
+    group selected (it used to save fine and silently never fire)."""
+
+    def test_unset_group_rejected(self):
+        plugin = make_plugin()
+        ok, values, errors = plugin.validateEventConfigUi(
+            {"groupDevice": ""}, "damGroupChange", 1)
+        self.assertFalse(ok)
+
+    def test_none_placeholder_rejected(self):
+        plugin = make_plugin()
+        ok, values, errors = plugin.validateEventConfigUi(
+            {"groupDevice": "none"}, "damGroupChange", 1)
+        self.assertFalse(ok)
+
+    def test_valid_group_accepted(self):
+        plugin = make_plugin()
+        result = plugin.validateEventConfigUi(
+            {"groupDevice": "12345", "saveBool": False}, "damGroupChange", 1)
+        self.assertTrue(result[0])
+
+    def test_savebool_without_savevar_rejected(self):
+        plugin = make_plugin()
+        ok, values, errors = plugin.validateEventConfigUi(
+            {"groupDevice": "12345", "saveBool": True, "saveVar": ""},
+            "damGroupChange", 1)
+        self.assertFalse(ok)
+
+
+class TestDeletionWarnings(unittest.TestCase):
+    """v1.9.13: deletion warnings are configuration diagnostics — no longer
+    gated by the Device Change Log toggle, and deleting a device that is a
+    member of a damGroup now warns naming the group."""
+
+    def test_monitored_deletion_warns_even_with_log_toggle_off(self):
+        plugin = make_plugin()
+        plugin.log_enabled = False
+        dev = MockDevice(812537401, "Basin Occupancy Sensor")
+        plugin.deviceDeleted(dev)
+        warn_text = " ".join(str(c) for c in plugin.logger.warning.call_args_list)
+        self.assertIn("Monitored device deleted", warn_text)
+
+    def test_group_member_deletion_warns_with_group_name(self):
+        plugin = make_plugin()
+        plugin.device_groups[5555] = {"name": "Bathroom Sensors", "members": {777}}
+        plugin._rebuild_group_index()
+        dev = MockDevice(777, "Some Bathroom Sensor")
+        plugin.deviceDeleted(dev)
+        warn_text = " ".join(str(c) for c in plugin.logger.warning.call_args_list)
+        self.assertIn("Bathroom Sensors", warn_text)
+        self.assertIn("777", warn_text)
+
+
+# ======================================
 # ENTRY POINT
 # ======================================
 
 if __name__ == "__main__":
-    print("\nSensor Monitor Plugin - Mock Test Suite")
+    print("\nDevice Activity Monitor Plugin - Mock Test Suite")
     print(f"plugin.py: {_plugin_path}")
     print(f"Monitored devices in DEVICE_MONITOR:    {len(DEVICE_MONITOR)}")
     print(f"Monitored variables in VARIABLE_MONITOR: {len(VARIABLE_MONITOR)}\n")

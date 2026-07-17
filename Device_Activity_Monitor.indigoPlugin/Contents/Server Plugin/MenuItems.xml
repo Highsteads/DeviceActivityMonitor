@@ -10,14 +10,14 @@
         <CallbackMethod>menuFindContactSensors</CallbackMethod>
     </MenuItem>
 
-    <MenuItem id="sep1"/>
+    <MenuItem id="sep1" isSeparator="true"/>
 
     <MenuItem id="reloadConfig">
         <Name>Reload Config File</Name>
         <CallbackMethod>menuReloadConfig</CallbackMethod>
     </MenuItem>
 
-    <MenuItem id="sep2"/>
+    <MenuItem id="sep2" isSeparator="true"/>
 
     <MenuItem id="toggleDeviceChangeLog">
         <Name>Toggle Device Change Log (on/off)</Name>
@@ -34,7 +34,7 @@
         <CallbackMethod>menuToggleTimestamps</CallbackMethod>
     </MenuItem>
 
-    <MenuItem id="sep3"/>
+    <MenuItem id="sep3" isSeparator="true"/>
 
     <MenuItem id="showPluginInfo">
         <Name>Show Plugin Info</Name>

@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 # Filename:    plugin_utils.py
 # Description: Shared utilities for all Indigo plugins (CliveS / Highsteads)
-#              Import via sys.path.insert using the same pattern as IndigoSecrets.py
-# Author:      CliveS & Claude Sonnet 4.6
-# Date:        10-05-2026
-# Version:     1.1
+#              Bundled in Contents/Server Plugin/ and imported via os.getcwd()
+# Author:      CliveS & Claude Fable 5
+# Date:        17-07-2026
+# Version:     1.2
 #
+# v1.2 (17-07-2026): Docstring brought in line with the 25-May-2026 Jay
+# convention — the banner is called from MENU callbacks (showPluginInfo,
+# test-connection diagnostics), never from __init__/startup. Import pattern
+# corrected to the bundle-local os.getcwd() form.
 # v1.1 (10-05-2026): Banner width reduced 110 -> 60 chars and label column
 # tightened 28 -> 20 chars.  Indigo prefixes every log line with the plugin
 # name (~30 chars), so a 110-char banner total exceeded most terminal widths
@@ -28,20 +32,24 @@ def log_startup_banner(plugin_id, display_name, version, extras=None):
                                extra lines appended after the standard block.
                                e.g. [("Compatible Hardware:", "Ecowitt / Fine Offset")]
 
-    Usage in plugin __init__():
+    Called from MENU callbacks only (showPluginInfo, Test Connection etc.) —
+    never from __init__/startup (trimmed-boot convention, Jay 25-May-2026).
+
+    Import at module level in plugin.py (cwd is Server Plugin/ at runtime):
+        import os as _os
         import sys as _sys
-        _sys.path.insert(0, "/Library/Application Support/Perceptive Automation")
+        _sys.path.insert(0, _os.getcwd())
         try:
             from plugin_utils import log_startup_banner
         except ImportError:
             log_startup_banner = None
 
-        # ... all other __init__ setup ...
-
+    Usage in showPluginInfo():
         if log_startup_banner:
-            log_startup_banner(pluginId, pluginDisplayName, pluginVersion)
+            log_startup_banner(self.pluginId, self.pluginDisplayName,
+                               self.pluginVersion)
         else:
-            indigo.server.log(f"{pluginDisplayName} v{pluginVersion} starting")
+            indigo.server.log(f"{self.pluginDisplayName} v{self.pluginVersion}")
     """
     title = f"Starting {display_name} Plugin"
     width = 60

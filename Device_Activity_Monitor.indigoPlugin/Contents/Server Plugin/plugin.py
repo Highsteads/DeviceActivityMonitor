@@ -4,7 +4,35 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Fable 5
 # Date:        17-07-2026
-# Version:     1.9.12
+# Version:     1.9.13
+#
+# v1.9.13 (17-07-2026) — deep-review LOW batch:
+# - Startup validation logs ONE summary line instead of a per-device /
+#   per-variable [OK] line (trimmed-boot convention) — missing entries
+#   still warn individually.
+# - Deletion warnings un-gated from the Device Change Log toggle (they are
+#   configuration diagnostics, not activity logging), and deleting a
+#   device that is a member of a damGroup now warns naming the group(s).
+# - _load_config builds into local dicts and assigns at the end (no
+#   partially-built config visible to deviceUpdated during a reload), and
+#   skips duplicate (device, state) entries with a warning (duplicates
+#   double-logged every change).
+# - New validateEventConfigUi: a damGroupChange trigger can no longer be
+#   saved without a group selected (it saved fine and silently never
+#   fired), and Save-firing-device requires a variable to be picked.
+# - Menu/discovery log lines now use _ts() so the Toggle Timestamps menu
+#   item applies to them too (they hand-rolled stamps frozen at the
+#   discovery start time).
+# - Discovery re-fetches guarded via _dev_or_none — a device deleted
+#   mid-scan no longer aborts the config write.
+# - MenuItems separators declared with isSeparator="true"; stale XML
+#   comments fixed (Devices/Events claimed the removed JSON-groups
+#   fallback still worked); discovery's final line now names the real
+#   menu item (Reload Config File); discovery JSON gains a _note that
+#   all_devices excludes filtered devices; plugin_utils docstring brought
+#   to the menu-only banner convention.
+# - +7 regression tests -> 135 (and 3 rewritten for the new contracts,
+#   rationale in their docstrings).
 #
 # v1.9.12 (17-07-2026) — deep-review MEDIUM batch:
 # - Group triggers no longer fire on bookkeeping-state churn: lastSeen /
@@ -624,8 +652,19 @@ class Plugin(indigo.PluginBase):
             self.device_groups.pop(dev.id, None)
             self._rebuild_group_index()
 
-        if not self.log_enabled:
-            return
+        # Deletion warnings are configuration diagnostics, NOT activity
+        # logging — they are deliberately not gated by the Device Change Log
+        # toggle (a stale config entry needs flagging either way).
+        if dev.id in self.group_members:
+            group_names = sorted(
+                info.get("name", "?") for info in self.device_groups.values()
+                if dev.id in info.get("members", set())
+            )
+            self.logger.warning(
+                f"{self._ts()}[Device Activity Monitor] WARNING - Deleted device was a "
+                f"member of group(s) {', '.join(repr(g) for g in group_names)}: "
+                f"'{dev.name}' (ID: {dev.id}) - remove it from the group ConfigUI"
+            )
 
         if dev.id not in self.device_monitor:
             return
@@ -674,9 +713,7 @@ class Plugin(indigo.PluginBase):
     def variableDeleted(self, var):
         super().variableDeleted(var)
 
-        if not self.log_enabled:
-            return
-
+        # Not gated by log_enabled — see deviceDeleted.
         if var.id not in self.variable_monitor:
             return
 
@@ -813,9 +850,9 @@ class Plugin(indigo.PluginBase):
                 self._update_smgroup_diagnostics(trigger, newDev, direction)
 
                 indigo.trigger.execute(trigger)
-                ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                ts = self._ts()
                 self.logger.debug(
-                    f"[{ts}] [Device Activity Monitor] Fired group trigger "
+                    f"{ts}[Device Activity Monitor] Fired group trigger "
                     f"'{trigger.name}' (fireOn={fire_on}, direction={direction}) "
                     f"for {newDev.name}"
                 )
@@ -1005,6 +1042,27 @@ class Plugin(indigo.PluginBase):
             return (False, valuesDict, errors)
         return (True, valuesDict)
 
+    def validateEventConfigUi(self, valuesDict, typeId, eventId):
+        """Reject a damGroupChange trigger saved without a group selected —
+        previously it saved fine and then silently never fired."""
+        errors = indigo.Dict()
+        ok = True
+        if typeId == "damGroupChange":
+            sel = str(valuesDict.get("groupDevice", "") or "").strip()
+            if not sel or sel == "none":
+                errors["groupDevice"] = ("Pick a Device Activity Monitor Group "
+                                         "device for this trigger to watch.")
+                ok = False
+            if valuesDict.get("saveBool", False):
+                save_var = str(valuesDict.get("saveVar", "") or "").strip()
+                if not save_var:
+                    errors["saveVar"] = ("Pick the variable to save the firing "
+                                         "device into (or untick Save firing device).")
+                    ok = False
+        if not ok:
+            return (False, valuesDict, errors)
+        return (True, valuesDict)
+
     def getDeviceConfigUiValues(self, pluginProps, typeId, devId):
         """Default folderFilter to (All folders) when creating a new group."""
         values = pluginProps
@@ -1041,7 +1099,8 @@ class Plugin(indigo.PluginBase):
 
     def menuDiscoverDevices(self):
         """Scan all Indigo devices, write device_discovery.json and
-        device_activity_monitor_config.json to <Indigo base>/Logs/DeviceActivityMonitor/.
+        device_activity_monitor_config.json to the plugin's Preferences
+        folder (<Indigo base>/Preferences/Plugins/<bundle id>/).
 
         Contact and motion sensor candidates are written as active entries,
         unless their device ID is listed in the existing config's "excluded_ids"
@@ -1055,8 +1114,8 @@ class Plugin(indigo.PluginBase):
           3. Save and re-run discovery (Plugins > Device Activity Monitor > Discover Devices)
           The device will now appear commented-out on every future re-discovery.
         """
-        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        self.logger.info(f"[{ts}] [Device Activity Monitor] Device discovery starting...")
+        ts = self._ts()
+        self.logger.info(f"{ts}[Device Activity Monitor] Device discovery starting...")
 
         # --- Read the existing config in full (preserved across re-discovery) ---
         # Preserves excluded_ids, the whole variables section, and per-entry
@@ -1073,12 +1132,12 @@ class Plugin(indigo.PluginBase):
             )
         if excluded_ids:
             self.logger.info(
-                f"[{ts}] [Device Activity Monitor] Preserving {len(excluded_ids)} "
+                f"{ts}[Device Activity Monitor] Preserving {len(excluded_ids)} "
                 f"excluded device(s) from existing config"
             )
         if var_entries:
             self.logger.info(
-                f"[{ts}] [Device Activity Monitor] Preserving {len(var_entries)} "
+                f"{ts}[Device Activity Monitor] Preserving {len(var_entries)} "
                 f"monitored variable(s) from existing config"
             )
 
@@ -1138,6 +1197,9 @@ class Plugin(indigo.PluginBase):
             os.makedirs(os.path.dirname(DISCOVERY_OUTPUT_PATH), exist_ok=True)
             discovery_output = {
                 "generated":          datetime.now().isoformat(),
+                "_note":              ("all_devices excludes devices from excluded "
+                                       "plugins (virtual/Alexa) and non-sensor devices "
+                                       "whose names match exclusion keywords"),
                 "total_devices":      len(all_devices),
                 "contact_candidates": len(contact_sensors),
                 "motion_candidates":  len(motion_sensors),
@@ -1147,16 +1209,16 @@ class Plugin(indigo.PluginBase):
             }
             self._write_atomic(DISCOVERY_OUTPUT_PATH,
                                json.dumps(discovery_output, indent=2, default=str))
-            self.logger.info(f"[{ts}] Full device list saved to: {DISCOVERY_OUTPUT_PATH}")
+            self.logger.info(f"{ts}Full device list saved to: {DISCOVERY_OUTPUT_PATH}")
         except Exception as e:
-            self.logger.error(f"[{ts}] ERROR saving device_discovery.json: {e}")
+            self.logger.error(f"{ts}ERROR saving device_discovery.json: {e}")
 
         # --- Save device_activity_monitor_config.json ---
         # Skipped when the existing config could not be parsed (ok False) —
         # never clobber the user's exclusions and edits with a blank slate.
         if not ok:
             self.logger.error(
-                f"[{ts}] device_activity_monitor_config.json NOT rewritten - "
+                f"{ts}device_activity_monitor_config.json NOT rewritten - "
                 f"existing file unreadable (see error above). Discovery details "
                 f"were still saved to device_discovery.json."
             )
@@ -1180,7 +1242,9 @@ class Plugin(indigo.PluginBase):
             if active_contacts:
                 lines.append("    # --- Contact / Door / Window sensors (active) ---")
                 for d in active_contacts:
-                    dev_obj = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     lines.append(
                         self._disc_config_entry(dev_obj, d["states"], commented=False,
                                                 overrides_map=device_overrides) + ","
@@ -1191,7 +1255,9 @@ class Plugin(indigo.PluginBase):
             if active_motions:
                 lines.append("    # --- Motion / Occupancy / Presence sensors (active) ---")
                 for d in active_motions:
-                    dev_obj    = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     mot_states = self._disc_motion_states(d["states"])
                     for state_name in mot_states:
                         lines.append(
@@ -1207,13 +1273,17 @@ class Plugin(indigo.PluginBase):
                     "(add ID to 'excluded_ids' above to keep excluded on re-discovery) ---"
                 )
                 for d in excluded_contacts:
-                    dev_obj = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     lines.append(
                         self._disc_config_entry(dev_obj, d["states"], commented=True,
                                                 overrides_map=device_overrides) + ","
                     )
                 for d in excluded_motions:
-                    dev_obj    = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     mot_states = self._disc_motion_states(d["states"])
                     for state_name in mot_states:
                         lines.append(
@@ -1227,7 +1297,9 @@ class Plugin(indigo.PluginBase):
             if other:
                 lines.append("    # --- Other devices (not contact/motion - remove # to enable) ---")
                 for d in other:
-                    dev_obj = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     lines.append(
                         self._disc_config_entry(dev_obj, d["states"], commented=True,
                                                 overrides_map=device_overrides) + ","
@@ -1251,36 +1323,36 @@ class Plugin(indigo.PluginBase):
 
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             self._write_atomic(CONFIG_PATH, "\n".join(lines) + "\n")
-            self.logger.info(f"[{ts}] Plugin config saved to: {CONFIG_PATH}")
+            self.logger.info(f"{ts}Plugin config saved to: {CONFIG_PATH}")
         except Exception as e:
-            self.logger.error(f"[{ts}] ERROR saving device_activity_monitor_config.json: {e}")
+            self.logger.error(f"{ts}ERROR saving device_activity_monitor_config.json: {e}")
 
         # --- Summary ---
         self.logger.info(
-            f"[{ts}] Discovery complete: {len(all_devices)} devices scanned, "
+            f"{ts}Discovery complete: {len(all_devices)} devices scanned, "
             f"{len(active_contacts)} contact, {len(active_motions)} motion sensor(s) active"
         )
         if excluded_contacts or excluded_motions:
             excl_names = [d["name"] for d in excluded_contacts + excluded_motions]
             self.logger.info(
-                f"[{ts}] Excluded (commented-out in config): {', '.join(excl_names)}"
+                f"{ts}Excluded (commented-out in config): {', '.join(excl_names)}"
             )
         if active_contacts:
-            self.logger.info(f"[{ts}] Contact sensors:")
+            self.logger.info(f"{ts}Contact sensors:")
             for d in active_contacts:
-                self.logger.info(f"[{ts}]   {d['name']} (ID: {d['id']}, Folder: {d['folder']})")
+                self.logger.info(f"{ts}  {d['name']} (ID: {d['id']}, Folder: {d['folder']})")
         if active_motions:
-            self.logger.info(f"[{ts}] Motion sensors:")
+            self.logger.info(f"{ts}Motion sensors:")
             for d in active_motions:
-                self.logger.info(f"[{ts}]   {d['name']} (ID: {d['id']}, Folder: {d['folder']})")
+                self.logger.info(f"{ts}  {d['name']} (ID: {d['id']}, Folder: {d['folder']})")
         self.logger.info(
-            f"[{ts}] Reload to apply: Plugins > Device Activity Monitor > Reload Plugin"
+            f"{ts}Reload to apply: Plugins > Device Activity Monitor > Reload Config File"
         )
 
     def menuFindContactSensors(self):
         """Log all contact/door/window and motion/occupancy sensor candidates."""
-        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        self.logger.info(f"[{ts}] === Contact & Motion Sensor Discovery ===")
+        ts = self._ts()
+        self.logger.info(f"{ts}=== Contact & Motion Sensor Discovery ===")
 
         contact_found = []
         motion_found  = []
@@ -1307,26 +1379,30 @@ class Plugin(indigo.PluginBase):
 
         total = len(contact_found) + len(motion_found)
         if not total:
-            self.logger.info(f"[{ts}] No contact or motion sensors found.")
+            self.logger.info(f"{ts}No contact or motion sensors found.")
         else:
             if contact_found:
-                self.logger.info(f"[{ts}] Contact sensors ({len(contact_found)}):")
+                self.logger.info(f"{ts}Contact sensors ({len(contact_found)}):")
                 for d in sorted(contact_found, key=lambda x: x["name"]):
-                    dev_obj = indigo.devices[d["id"]]
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     entry   = self._disc_config_entry(dev_obj, d["states"], commented=False)
-                    self.logger.info(f"[{ts}]   {d['name']}  (ID: {d['id']}, Folder: {d['folder']})")
-                    self.logger.info(f"[{ts}]   {entry}")
+                    self.logger.info(f"{ts}  {d['name']}  (ID: {d['id']}, Folder: {d['folder']})")
+                    self.logger.info(f"{ts}  {entry}")
             if motion_found:
-                self.logger.info(f"[{ts}] Motion sensors ({len(motion_found)}):")
+                self.logger.info(f"{ts}Motion sensors ({len(motion_found)}):")
                 for d in sorted(motion_found, key=lambda x: x["name"]):
                     mot_states = self._disc_motion_states(d["states"])
-                    self.logger.info(f"[{ts}]   {d['name']}  (ID: {d['id']}, Folder: {d['folder']})")
-                    dev_obj = indigo.devices[d["id"]]
+                    self.logger.info(f"{ts}  {d['name']}  (ID: {d['id']}, Folder: {d['folder']})")
+                    dev_obj = self._dev_or_none(d["id"])
+                    if dev_obj is None:
+                        continue
                     for state_name in mot_states:
                         entry = self._disc_motion_entry(dev_obj, state_name, commented=False)
-                        self.logger.info(f"[{ts}]   {entry}")
+                        self.logger.info(f"{ts}  {entry}")
 
-        self.logger.info(f"[{ts}] === End of Discovery ===")
+        self.logger.info(f"{ts}=== End of Discovery ===")
 
     def menuReloadConfig(self):
         """Reload device_activity_monitor_config.json without a full plugin restart.
@@ -1341,9 +1417,9 @@ class Plugin(indigo.PluginBase):
         self._validate_monitored_devices()
         self._validate_monitored_variables()
 
-        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        ts = self._ts()
         self.logger.info(
-            f"[{ts}] [Device Activity Monitor] Config reloaded - "
+            f"{ts}[Device Activity Monitor] Config reloaded - "
             f"{old_dev_count} -> {len(self.device_monitor)} devices, "
             f"{old_var_count} -> {len(self.variable_monitor)} variables"
         )
@@ -1364,6 +1440,15 @@ class Plugin(indigo.PluginBase):
         there as needed.
         """
         return getattr(dev, "pluginId", "") in _EXCLUDED_PLUGIN_IDS
+
+    @staticmethod
+    def _dev_or_none(dev_id):
+        """Re-fetch a device by id, or None if it vanished since the scan —
+        a device deleted mid-discovery must not abort the config write."""
+        try:
+            return indigo.devices[dev_id]
+        except KeyError:
+            return None
 
     @staticmethod
     def _disc_is_actuator_class(dev):
@@ -1763,8 +1848,14 @@ class Plugin(indigo.PluginBase):
                 pass  # logger may not be ready during __init__
             return
 
-        # --- Build self.device_monitor from "devices" list ---
-        self.device_monitor = {}
+        # Build into LOCAL dicts and assign at the end — menuReloadConfig
+        # calls this on the live plugin, and assigning self.device_monitor
+        # early would expose a partially-built config to deviceUpdated
+        # (which runs on another thread) for the duration of the build.
+
+        # --- Build device_monitor from "devices" list ---
+        device_monitor = {}
+        seen_pairs     = set()
         for entry in config.get("devices", []):
             try:
                 dev_id = int(entry["id"])
@@ -1785,13 +1876,22 @@ class Plugin(indigo.PluginBase):
                 state_conf["on_value"]  = entry["on_value"]
             if "off_value" in entry:
                 state_conf["off_value"] = entry["off_value"]
-            self.device_monitor.setdefault(dev_id, []).append(state_conf)
+            # Duplicate (device, state) entries would double-log every change.
+            pair = (dev_id, state_conf["state"])
+            if pair in seen_pairs:
+                self.logger.warning(
+                    f"[Device Activity Monitor] duplicate config entry for device "
+                    f"{dev_id} state '{state_conf['state']}' skipped"
+                )
+                continue
+            seen_pairs.add(pair)
+            device_monitor.setdefault(dev_id, []).append(state_conf)
 
-        # --- Build self.variable_monitor from "variables" list ---
+        # --- Build variable_monitor from "variables" list ---
         # Guarded like the devices loop above: one malformed hand-edited
         # entry must skip-and-warn, not raise out of __init__ and kill the
         # whole plugin.
-        self.variable_monitor = {}
+        variable_monitor = {}
         for entry in config.get("variables", []):
             try:
                 var_id = int(entry["id"])
@@ -1800,9 +1900,12 @@ class Plugin(indigo.PluginBase):
                     f"[Device Activity Monitor] skipping variable config entry with missing/invalid id: {entry!r}"
                 )
                 continue
-            self.variable_monitor[var_id] = {
+            variable_monitor[var_id] = {
                 "label": entry.get("label", entry.get("name", f"Variable {var_id}"))
             }
+
+        self.device_monitor   = device_monitor
+        self.variable_monitor = variable_monitor
 
         # Groups are damGroup Indigo devices as of v1.8.1; they're loaded
         # by deviceStartComm, not by this method. self.device_groups is
@@ -1817,57 +1920,57 @@ class Plugin(indigo.PluginBase):
             pass  # logger may not be ready during __init__
 
     def _validate_monitored_devices(self):
-        """Check all device_monitor entries exist in Indigo at startup."""
-        missing = []
-        found   = []
+        """Check all device_monitor entries exist in Indigo at startup.
 
-        for device_id in self.device_monitor:
-            if device_id in indigo.devices:
-                found.append(f"  [OK] {indigo.devices[device_id].name} (ID: {device_id})")
-            else:
-                missing.append(f"  [!]  ID {device_id} - not found in Indigo")
-
-        self.logger.info(f"[Device Activity Monitor] Device validation - {len(found)} found, {len(missing)} missing:")
-        for entry in found:
-            self.logger.info(entry)
+        One summary INFO line only (trimmed-boot convention, Jay 25-May-2026)
+        — per-device [OK] lines buried the stale-id warnings in boot noise.
+        Missing entries still get one warning line each.
+        """
+        missing = [d for d in self.device_monitor if d not in indigo.devices]
+        found   = len(self.device_monitor) - len(missing)
 
         if missing:
-            for entry in missing:
-                self.logger.warning(entry)
+            self.logger.info(
+                f"[Device Activity Monitor] Device validation - {found} found, "
+                f"{len(missing)} missing:"
+            )
+            for device_id in missing:
+                self.logger.warning(f"  [!]  ID {device_id} - not found in Indigo")
             self.logger.warning(
                 f"[Device Activity Monitor] {len(missing)} monitored device(s) not found - "
                 f"check IDs in config file or DEVICE_MONITOR in plugin.py"
             )
         else:
-            self.logger.info("[Device Activity Monitor] All monitored devices validated OK")
+            self.logger.info(
+                f"[Device Activity Monitor] All monitored devices validated OK ({found})"
+            )
 
     def _validate_monitored_variables(self):
-        """Check all variable_monitor entries exist in Indigo at startup."""
+        """Check all variable_monitor entries exist in Indigo at startup.
+
+        Summary line only — see _validate_monitored_devices.
+        """
         if not self.variable_monitor:
             return
 
-        missing = []
-        found   = []
-
-        for var_id in self.variable_monitor:
-            if var_id in indigo.variables:
-                found.append(f"  [OK] {indigo.variables[var_id].name} (ID: {var_id})")
-            else:
-                missing.append(f"  [!]  ID {var_id} - not found in Indigo")
-
-        self.logger.info(f"[Device Activity Monitor] Variable validation - {len(found)} found, {len(missing)} missing:")
-        for entry in found:
-            self.logger.info(entry)
+        missing = [v for v in self.variable_monitor if v not in indigo.variables]
+        found   = len(self.variable_monitor) - len(missing)
 
         if missing:
-            for entry in missing:
-                self.logger.warning(entry)
+            self.logger.info(
+                f"[Device Activity Monitor] Variable validation - {found} found, "
+                f"{len(missing)} missing:"
+            )
+            for var_id in missing:
+                self.logger.warning(f"  [!]  ID {var_id} - not found in Indigo")
             self.logger.warning(
                 f"[Device Activity Monitor] {len(missing)} monitored variable(s) not found - "
                 f"check IDs in config file or VARIABLE_MONITOR in plugin.py"
             )
         else:
-            self.logger.info("[Device Activity Monitor] All monitored variables validated OK")
+            self.logger.info(
+                f"[Device Activity Monitor] All monitored variables validated OK ({found})"
+            )
 
     # ======================================
     # Menu handlers
