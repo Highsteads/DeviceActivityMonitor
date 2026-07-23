@@ -14,6 +14,8 @@
 
 ## What's new in 1.10.x
 
+1.10.1 (21-Jul-2026) is housekeeping: named log levels now map to the real logging levels — warnings and errors raised through the shared helper had been appearing as plain info lines, so amber and red entries people relied on for diagnosis never showed. Shared-utility refresh: calling the log timestamp filter twice no longer double-stamps every line, and the module imports cleanly outside Indigo.
+
 The 1.9.11 → 1.10.0 releases are the result of a full deep review of the plugin.
 The headline fixes: editing a group's members now takes effect immediately (it
 used to silently wait for a plugin restart), group triggers no longer double-fire
