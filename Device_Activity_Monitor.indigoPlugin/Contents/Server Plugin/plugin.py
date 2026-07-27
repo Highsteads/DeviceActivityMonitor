@@ -43,7 +43,7 @@
 #   discovery is the normal path). Test fixtures moved into test_plugin.py.
 # - Events.xml hint notes that members without an on/off state only fire
 #   "Any change".
-# - +7 feature tests -> 142.
+# - +7 feature tests -> 143.
 #
 # v1.9.13 (17-07-2026) — deep-review LOW batch:
 # - Startup validation logs ONE summary line instead of a per-device /
