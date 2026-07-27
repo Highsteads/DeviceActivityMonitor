@@ -1,6 +1,6 @@
 # Device Activity Monitor — Indigo Plugin
 
-**Version**: 1.10.0
+**Version**: 1.10.1
 **Author**: CliveS
 **Platform**: Indigo 2022.1 or later / macOS / Python 3.10+
 
@@ -55,7 +55,7 @@ group still references a deleted device. The test suite has grown from 104 to
 - [Repository structure](#repository-structure)
 - [Migrating from "Sensor Monitor"](#migrating-from-sensor-monitor)
 - [Changelog](#changelog)
-- [License](#license)
+- [Authors & licence](#authors--licence)
 
 ---
 
@@ -534,6 +534,7 @@ this section exists only for completeness if I ever do a clean reinstall.)
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.10.1  | 2026-07-21 | Shared utility refresh — the log timestamp filter is now idempotent, so turning timestamps on and off twice no longer double-stamps every line, the module imports outside Indigo for offline tests, a malformed log call keeps its arguments instead of losing them, and a new shared `as_bool()` stops a preference saved as the string `"false"` reading as true. No plugin logic changed |
 | 1.10.0  | 2026-07-17 | Deep-review feature batch — Test Fire All Group Triggers menu item, discovery applies its results immediately and preserves manually added entries, Configure dialog for the runtime toggles, stale group-member and stale-exclusion warnings, fallback config now ships empty |
 | 1.9.13  | 2026-07-17 | Deep-review polish — one-line startup validation summary, deletion warnings always shown (and now cover group members), duplicate config entries skipped, triggers can no longer be saved without a group, timestamp toggle honoured on menu output |
 | 1.9.12  | 2026-07-17 | Deep-review robustness — group triggers ignore housekeeping-state churn (no more double-fires on Zigbee2MQTT duplicate publishes), one failing trigger no longer blocks the rest, atomic config writes, toggle flips survive a crash, locks/relays no longer offered as sensors by name |
@@ -542,6 +543,7 @@ this section exists only for completeness if I ever do a clean reinstall.)
 | 1.9.9   | 2026-06-10 | Fleet audit — lint cleanup and CI gate |
 | 1.9.8   | 2026-06-05 | Estate bug-sweep — guarded config id parse, merged duplicate deviceDeleted |
 | 1.9.7   | 2026-06-04 | Millisecond-precision timestamps on menu and discovery output |
+| 1.9.6   | 2026-05-25 | Group devices restart their comms only when the member list changes — the folder filter is a picker for the dialog and never affected what is monitored, so changing it used to cycle the device for nothing (`didDeviceCommPropertyChange`) |
 | 1.9.5   | 2026-05-23 | Three runtime toggle menu items — Device Change Log, Group Change Triggers, Timestamps in Log. Each is independent, persists across restarts, defaults ON |
 | 1.9.4   | 2026-05-14 | Discovery correctly classifies multi-capability Aqara presence sensors (PS-S04D, FP1 etc.) using `pirDetection` / `presenceDetectionOptions` state names |
 | 1.9.3   | 2026-05-13 | Added `on_value` / `off_value` config keys for explicit value matching on string-typed states (e.g. presenceEvent `enter`/`leave`) |
