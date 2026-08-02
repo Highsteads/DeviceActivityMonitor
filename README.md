@@ -534,6 +534,7 @@ this section exists only for completeness if I ever do a clean reinstall.)
 
 | Version | Date | Change |
 |---------|------|--------|
+| 1.10.2  | 2026-08-02 | Adds the support-URL key Indigo requires in every plugin, which gives the plugin an **About Device Activity Monitor** menu item linking to its page. No plugin logic changed |
 | 1.10.1  | 2026-07-21 | Shared utility refresh — the log timestamp filter is now idempotent, so turning timestamps on and off twice no longer double-stamps every line, the module imports outside Indigo for offline tests, a malformed log call keeps its arguments instead of losing them, and a new shared `as_bool()` stops a preference saved as the string `"false"` reading as true. No plugin logic changed |
 | 1.10.0  | 2026-07-17 | Deep-review feature batch — Test Fire All Group Triggers menu item, discovery applies its results immediately and preserves manually added entries, Configure dialog for the runtime toggles, stale group-member and stale-exclusion warnings, fallback config now ships empty |
 | 1.9.13  | 2026-07-17 | Deep-review polish — one-line startup validation summary, deletion warnings always shown (and now cover group members), duplicate config entries skipped, triggers can no longer be saved without a group, timestamp toggle honoured on menu output |

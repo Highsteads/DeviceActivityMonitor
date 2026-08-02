@@ -4,7 +4,7 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.8
 # Date:        21-07-2026
-# Version:     1.10.1
+# Version:     1.10.2
 #
 # v1.10.1 (21-07-2026): shared plugin_utils.py refreshed to v1.3 — the
 # estate-wide propagation of the four Appliance Monitor deep-review fixes.
