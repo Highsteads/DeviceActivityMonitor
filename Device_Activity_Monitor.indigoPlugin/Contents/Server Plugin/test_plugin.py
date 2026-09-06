@@ -13,6 +13,7 @@
 
 import sys
 import os
+import logging
 import tempfile
 import unittest
 import importlib.util
@@ -104,6 +105,33 @@ class MockPluginBase:
         self.pluginVersion     = pluginVersion
         self.pluginPrefs       = pluginPrefs
         self.logger            = MagicMock()
+        # Real PluginBase makes debug a property whose setter lowers the
+        # EVENT-LOG handler, so assigning it is not the inert attribute write
+        # a plain mock would give. Set the handler before _debug so the
+        # setter below always has something to talk to.
+        self.indigo_log_handler = MagicMock()
+        self._debug             = False
+
+    # Mirrors indigo PluginBase.debug (plugin_base.py:332-353) verbatim,
+    # including the bare "if value:" truthiness test. That test is the whole
+    # reason showDebugInfo has to be coerced with as_bool: a stored string
+    # "false" is truthy, the handler drops to DEBUG, and every activity line
+    # the quiet default keeps out of the shared event log goes straight back
+    # into it. A test asserting only "plugin.debug is False" would be
+    # checking the symptom; asserting the handler level checks the damage.
+    @property
+    def debug(self):
+        return self._debug
+
+    @debug.setter
+    def debug(self, value):
+        self._debug = value
+        if not hasattr(self, "indigo_log_handler"):
+            return
+        if value:
+            self.indigo_log_handler.setLevel(logging.DEBUG)
+        else:
+            self.indigo_log_handler.setLevel(logging.INFO)
 
     def deviceUpdated(self, origDev, newDev):
         pass  # super() in plugin lands here
@@ -251,6 +279,56 @@ def server_log_messages():
     return [c.args[0] for c in mock_indigo.server.log.call_args_list]
 
 
+def io_open_plugin_source():
+    """The plugin source, for the structural guards below."""
+    with open(_plugin_path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _logger_messages(plugin, *levels):
+    """Messages the plugin passed to the named self.logger levels."""
+    out = []
+    for level in levels:
+        for call in getattr(plugin.logger, level).call_args_list:
+            if call.args:
+                out.append(str(call.args[0]))
+    return out
+
+
+def activity_messages(plugin):
+    """The activity narration the plugin produced, whichever route it took.
+
+    _log_activity() sends a line to logger.debug (quiet, the default) or to
+    logger.info (when the user has opted the narration back into the event
+    log), so a test that cares only THAT the line was produced - and what it
+    says - looks at both. Use event_log_messages() to assert about WHERE it
+    went.
+    """
+    return _logger_messages(plugin, "debug", "info")
+
+
+def plugin_file_messages(plugin):
+    """Everything that reaches the plugin's own log file.
+
+    Indigo attaches a file handler to self.logger at THREADDEBUG, so every
+    level lands in the file. indigo.server.log() bypasses the logger and so
+    never reaches it.
+    """
+    return _logger_messages(plugin, "debug", "info", "warning", "error")
+
+
+def event_log_messages(plugin):
+    """Everything that reaches the SHARED Indigo event log.
+
+    Two routes get there: a direct indigo.server.log() call, and any
+    self.logger call at INFO or above - Indigo sets indigo_log_handler to
+    INFO, which is precisely why logger.debug() is the quiet route and why
+    warnings and errors still reach Log_Error_Watch.py.
+    """
+    return server_log_messages() + _logger_messages(
+        plugin, "info", "warning", "error")
+
+
 # ======================================
 # TEST: STARTUP VALIDATION
 # ======================================
@@ -345,7 +423,7 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(
             any("Basin Occupancy Sensor" in m and "Occupancy" in m and m.endswith("ON")
                 for m in msgs),
@@ -358,7 +436,7 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=False)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(
             any("Basin Occupancy Sensor" in m and "Occupancy" in m and m.endswith("OFF")
                 for m in msgs),
@@ -372,6 +450,8 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         self.plugin.deviceUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="Unchanged state must narrate nothing on either route.")
 
     def test_label_same_as_device_name_not_duplicated(self):
         """When label equals device name, name is printed once, not twice.
@@ -385,7 +465,7 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         new  = MockDevice(333333, "My Test Sensor", on_state=False)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertFalse(
             any("My Test Sensor My Test Sensor" in m for m in msgs),
             msg=f"Device name should not appear twice. Got: {msgs}"
@@ -401,7 +481,7 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(
             any("Basin Occupancy Sensor" in m and "Occupancy" in m for m in msgs),
             msg=f"Expected device name + label. Got: {msgs}"
@@ -414,6 +494,8 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
         self.plugin.deviceUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="An unmonitored device must narrate nothing on either route.")
 
     def test_device_without_onstate_produces_no_error(self):
         """deviceUpdated with state='onState' but device lacking onState does not log
@@ -426,6 +508,8 @@ class TestDeviceUpdatedOnState(unittest.TestCase):
 
         self.plugin.logger.error.assert_not_called()
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="A device with no onState must narrate nothing on either route.")
 
 
 # ======================================
@@ -447,7 +531,7 @@ class TestDeviceUpdatedCustomStates(unittest.TestCase):
                           states={"pirDetection": False, "presence": True})
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertFalse(any("PIR" in m for m in msgs),
             msg=f"PIR unchanged - should not log. Got: {msgs}")
         self.assertTrue(any("mmWave Presence" in m and "ON" in m for m in msgs),
@@ -461,7 +545,7 @@ class TestDeviceUpdatedCustomStates(unittest.TestCase):
                           states={"pirDetection": True,  "presence": True})
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any("PIR" in m and m.endswith("ON") for m in msgs),
             msg=f"Expected PIR ON. Got: {msgs}")
         self.assertTrue(any("mmWave Presence" in m and m.endswith("ON") for m in msgs),
@@ -475,7 +559,7 @@ class TestDeviceUpdatedCustomStates(unittest.TestCase):
                           states={"pirDetection": False, "presence": False})
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any("mmWave Presence" in m and m.endswith("OFF") for m in msgs),
             msg=f"Expected mmWave Presence OFF. Got: {msgs}")
 
@@ -497,7 +581,7 @@ class TestDeviceUpdatedCustomText(unittest.TestCase):
         new  = MockDevice(415253439, "Bathroom Door Contact", on_state=True)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any(m.endswith("OPEN") for m in msgs),
             msg=f"Expected message ending with OPEN. Got: {msgs}")
         self.assertFalse(any(m.endswith("ON") for m in msgs),
@@ -509,7 +593,7 @@ class TestDeviceUpdatedCustomText(unittest.TestCase):
         new  = MockDevice(415253439, "Bathroom Door Contact", on_state=False)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any(m.endswith("CLOSED") for m in msgs),
             msg=f"Expected message ending with CLOSED. Got: {msgs}")
         self.assertFalse(any(m.endswith("OFF") for m in msgs),
@@ -546,6 +630,8 @@ class TestDeviceUpdatedRename(unittest.TestCase):
         self.plugin.deviceUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="An unchanged name must narrate nothing on either route.")
 
     def test_rename_on_unmonitored_device_not_logged(self):
         """Rename of an unmonitored device is silently ignored."""
@@ -554,6 +640,8 @@ class TestDeviceUpdatedRename(unittest.TestCase):
         self.plugin.deviceUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="An unmonitored rename must narrate nothing on either route.")
 
 
 # ======================================
@@ -611,7 +699,7 @@ class TestLogFormat(unittest.TestCase):
         new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
         self.plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         ts_pattern = re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]")
         self.assertTrue(
             any(ts_pattern.match(m) for m in msgs),
@@ -692,7 +780,7 @@ class TestVariableUpdated(unittest.TestCase):
         new  = MockVariable(241032502, "Lux_Level", "520")
         self.plugin.variableUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any("450" in m and "520" in m and "->" in m for m in msgs),
             msg=f"Expected '450 -> 520' in log. Got: {msgs}")
 
@@ -702,7 +790,7 @@ class TestVariableUpdated(unittest.TestCase):
         new  = MockVariable(241032502, "Lux_Level", "200")
         self.plugin.variableUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(self.plugin)
         self.assertTrue(any("Lux Level" in m for m in msgs),
             msg=f"Expected label 'Lux Level' in log. Got: {msgs}")
 
@@ -713,6 +801,8 @@ class TestVariableUpdated(unittest.TestCase):
         self.plugin.variableUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="An unchanged variable must narrate nothing on either route.")
 
     def test_unmonitored_variable_ignored(self):
         """Variable not in variable_monitor is silently ignored."""
@@ -721,6 +811,8 @@ class TestVariableUpdated(unittest.TestCase):
         self.plugin.variableUpdated(orig, new)
 
         mock_indigo.server.log.assert_not_called()
+        self.assertEqual(activity_messages(self.plugin), [],
+            msg="An unmonitored variable must narrate nothing on either route.")
 
     def test_rename_detection_logged(self):
         """Variable rename on a monitored variable is logged."""
@@ -994,7 +1086,7 @@ class TestConfigLoading(unittest.TestCase):
         new  = MockDevice(333333, "JSON Test Device", on_state=True)
         plugin.deviceUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(plugin)
         self.assertTrue(
             any("JSON Test Device" in m and "JSON Label" in m for m in msgs),
             msg=f"Expected JSON-configured label in log. Got: {msgs}"
@@ -1017,7 +1109,7 @@ class TestConfigLoading(unittest.TestCase):
         new  = MockVariable(444444, "some_var", "20")
         plugin.variableUpdated(orig, new)
 
-        msgs = server_log_messages()
+        msgs = activity_messages(plugin)
         self.assertTrue(
             any("JSON Var Label" in m and "10" in m and "20" in m for m in msgs),
             msg=f"Expected JSON-configured variable label in log. Got: {msgs}"
@@ -2349,6 +2441,602 @@ class TestManualEntryPreservation(unittest.TestCase):
             _mod.DISCOVERY_OUTPUT_PATH = orig_disc
             _mod.CONFIG_PATH           = orig_config
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ======================================
+# TEST: WHERE THE ACTIVITY NARRATION GOES
+#
+# The plugin used to push one line straight into the shared Indigo event log
+# for every monitored change, with no way to stop it. Measured on the author's
+# estate over the 7 days to 06-09-2026 that was 5,529 lines, 790 a day, about a
+# third of every line in the log. It now goes to the plugin's own log unless
+# the user opts back in with logActivityToEventLog.
+#
+# The routing model these tests assert against, taken from Indigo's
+# plugin_base.py: self.logger carries a file handler at THREADDEBUG and an
+# event-log handler at INFO. So .debug() reaches the plugin's file only, and
+# .info() and above reach both.
+# ======================================
+
+class TestActivityRouting(unittest.TestCase):
+
+    def setUp(self):
+        mock_indigo.server.log.reset_mock()
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+
+    @staticmethod
+    def _trip_sensor(plugin):
+        """Drive one monitored device change - the 790-a-day line."""
+        orig = MockDevice(812537401, "Basin Occupancy Sensor", on_state=False)
+        new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
+        plugin.deviceUpdated(orig, new)
+
+    # --- default: quiet ---
+
+    def test_default_is_quiet_on_a_fresh_install(self):
+        """No pref at all means the narration stays out of the event log.
+
+        A fresh install has never opened the dialog, so the key is absent
+        entirely. That path has to default to quiet or the upgrade changes
+        nothing for anybody.
+        """
+        plugin = make_plugin()
+        self.assertFalse(plugin.activity_to_event_log)
+
+    def test_state_change_does_not_reach_the_event_log_by_default(self):
+        """THE headline: a sensor trip leaves the shared event log alone."""
+        plugin = make_plugin()
+        self._trip_sensor(plugin)
+
+        self.assertEqual(event_log_messages(plugin), [],
+            msg=f"Event log should be untouched. Got: {event_log_messages(plugin)}")
+
+    def test_state_change_still_reaches_the_plugins_own_log_by_default(self):
+        """Nothing is lost - the line still exists, and reads the same."""
+        plugin = make_plugin()
+        self._trip_sensor(plugin)
+
+        msgs = plugin_file_messages(plugin)
+        self.assertTrue(
+            any("Basin Occupancy Sensor" in m and m.endswith("ON") for m in msgs),
+            msg=f"Expected the narration in the plugin log. Got: {msgs}")
+
+    def test_variable_change_does_not_reach_the_event_log_by_default(self):
+        """A chatty variable follows the same route as a chatty sensor."""
+        plugin = make_plugin()
+        orig = MockVariable(241032502, "Lux_Level", "450")
+        new  = MockVariable(241032502, "Lux_Level", "520")
+        plugin.variableUpdated(orig, new)
+
+        self.assertEqual(event_log_messages(plugin), [],
+            msg=f"Event log should be untouched. Got: {event_log_messages(plugin)}")
+        self.assertTrue(
+            any("450" in m and "520" in m for m in plugin_file_messages(plugin)),
+            msg="The variable line must still reach the plugin's own log.")
+
+    # --- opted back in ---
+
+    def test_opting_in_puts_the_narration_back_in_the_event_log(self):
+        """A user who reads the event log as an activity feed gets it back."""
+        plugin = make_plugin({"logActivityToEventLog": True})
+        self.assertTrue(plugin.activity_to_event_log)
+        self._trip_sensor(plugin)
+
+        msgs = event_log_messages(plugin)
+        self.assertTrue(
+            any("Basin Occupancy Sensor" in m and m.endswith("ON") for m in msgs),
+            msg=f"Expected the narration in the event log. Got: {msgs}")
+
+    def test_opting_in_still_writes_to_the_plugins_own_log(self):
+        """Opting in adds a destination, it does not move the line."""
+        plugin = make_plugin({"logActivityToEventLog": True})
+        self._trip_sensor(plugin)
+
+        self.assertTrue(
+            any("Basin Occupancy Sensor" in m for m in plugin_file_messages(plugin)),
+            msg="logger.info reaches the file handler too - nothing is lost.")
+
+    def test_the_line_reads_identically_on_both_routes(self):
+        """Only the destination changes, never the wording."""
+        quiet = make_plugin()
+        loud  = make_plugin({"logActivityToEventLog": True})
+        self._trip_sensor(quiet)
+        self._trip_sensor(loud)
+
+        def narration(msgs):
+            return [m for m in msgs if "Basin Occupancy Sensor" in m]
+
+        self.assertEqual(
+            [m[m.index("]") + 1:] for m in narration(activity_messages(quiet))],
+            [m[m.index("]") + 1:] for m in narration(activity_messages(loud))],
+            msg="Same message, different destination.")
+
+    def test_a_string_false_pref_is_still_quiet(self):
+        """bool("false") is True, and here that would re-flood the event log.
+
+        Indigo re-serialises saved textfield and menu values as strings. A
+        checkbox normally round-trips as a real bool, but this pref defaults to
+        quiet, so the wrong coercion fails in the expensive direction - hence
+        as_bool() rather than bool().
+        """
+        for junk in ("false", "0", "no", "off", "f", ""):
+            with self.subTest(pref=junk):
+                plugin = make_plugin({"logActivityToEventLog": junk})
+                self.assertFalse(plugin.activity_to_event_log,
+                    msg=f"pref {junk!r} must not turn the event log back on")
+
+    def test_a_string_true_pref_opts_in(self):
+        """The mirror case, so the coercion is not simply always-False."""
+        for truthy in ("true", "1", "yes", "on", "t", True):
+            with self.subTest(pref=truthy):
+                plugin = make_plugin({"logActivityToEventLog": truthy})
+                self.assertTrue(plugin.activity_to_event_log)
+
+    # --- faults must never take the quiet route ---
+
+    def test_a_deleted_monitored_device_still_warns_in_the_event_log(self):
+        """Log_Error_Watch.py reads the EVENT log and nothing else.
+
+        A fault that only lands in a plugin's own file is a fault nobody is
+        watching, so every warning and error has to keep reaching the shared
+        log even when the narration has gone quiet.
+        """
+        plugin = make_plugin()
+        self.assertFalse(plugin.activity_to_event_log)
+        plugin.deviceDeleted(MockDevice(812537401, "Basin Occupancy Sensor"))
+
+        plugin.logger.warning.assert_called()
+        msgs = event_log_messages(plugin)
+        self.assertTrue(
+            any("Monitored device deleted" in m for m in msgs),
+            msg=f"Deletion warning must reach the event log. Got: {msgs}")
+
+    def test_a_deleted_monitored_variable_still_warns_in_the_event_log(self):
+        plugin = make_plugin()
+        plugin.variableDeleted(MockVariable(241032502, "Lux_Level"))
+
+        msgs = event_log_messages(plugin)
+        self.assertTrue(
+            any("Monitored variable deleted" in m for m in msgs),
+            msg=f"Deletion warning must reach the event log. Got: {msgs}")
+
+    def test_a_state_read_error_still_reaches_the_event_log(self):
+        """An unreadable state is a fault, not narration."""
+        class ExplodingStates(dict):
+            def get(self, *a, **k):
+                raise RuntimeError("states unavailable")
+
+        plugin = make_plugin()
+        plugin.device_monitor[777001] = [{"state": "presence", "label": "Presence"}]
+        orig = MockDevice(777001, "Broken Sensor")
+        new  = MockDevice(777001, "Broken Sensor")
+        orig.states = ExplodingStates()
+        new.states  = ExplodingStates()
+        plugin.deviceUpdated(orig, new)
+
+        plugin.logger.error.assert_called()
+        self.assertTrue(
+            any("Broken Sensor" in m for m in event_log_messages(plugin)),
+            msg="A state-read error must reach the event log.")
+
+    def test_a_group_trigger_failure_still_reaches_the_event_log(self):
+        """Found by mutation sweep: demoting this error to debug left the whole
+        suite green, so nothing was guarding the one handler that catches a
+        failure in the plugin's actual product - the group triggers."""
+        class ExplodingOnState(MockDevice):
+            @property
+            def onState(self):
+                raise RuntimeError("device object unusable")
+
+            @onState.setter
+            def onState(self, value):
+                pass
+
+        plugin = make_plugin()
+        plugin.group_members = {777002}
+        orig = ExplodingOnState(777002, "Group Member")
+        new  = ExplodingOnState(777002, "Group Member")
+        plugin.deviceUpdated(orig, new)
+
+        plugin.logger.error.assert_called()
+        self.assertTrue(
+            any("group-trigger error" in m for m in event_log_messages(plugin)),
+            msg=f"Group-trigger failure must reach the event log. "
+                f"Got: {event_log_messages(plugin)}")
+
+    def test_a_missing_device_at_startup_still_warns_in_the_event_log(self):
+        """The one fault this plugin actually raises in normal service -
+        6 occurrences in the 7 days measured, all of them stale config ids."""
+        mock_indigo.devices = make_device_registry(missing_ids=[812537401])
+        plugin = make_plugin()
+        plugin.startup()
+
+        msgs = event_log_messages(plugin)
+        self.assertTrue(
+            any("not found" in m for m in msgs),
+            msg=f"Stale-id warning must reach the event log. Got: {msgs}")
+
+    def test_no_narration_call_writes_straight_to_the_event_log(self):
+        """Structural guard: _log_activity is the ONLY route for narration.
+
+        Written against the parsed tree rather than the file text so a
+        changelog entry describing the old behaviour cannot satisfy it. The
+        two deviceUpdated/variableUpdated indigo.server.log() calls that
+        remain are the rename notices, which are deliberate keeps - rare
+        configuration events, none at all in the 7 days measured.
+        """
+        import ast
+        tree = ast.parse(io_open_plugin_source())
+        offenders = []
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            if func.name not in ("deviceUpdated", "variableUpdated"):
+                continue
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Call):
+                    continue
+                target = ast.unparse(node.func)
+                if target != "indigo.server.log":
+                    continue
+                text = " ".join(
+                    n.value for n in ast.walk(node)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str))
+                if "renamed" not in text:
+                    offenders.append(f"{func.name}: {ast.unparse(node)[:90]}")
+        self.assertEqual(offenders, [],
+            msg="Narration must go through _log_activity, not indigo.server.log.")
+
+    def test_the_guard_above_can_actually_see_a_violation(self):
+        """A structural guard that matches nothing passes vacuously."""
+        import ast
+        tree = ast.parse(io_open_plugin_source())
+        found = [
+            n for func in ast.walk(tree)
+            if isinstance(func, ast.FunctionDef) and func.name == "deviceUpdated"
+            for n in ast.walk(func)
+            if isinstance(n, ast.Call) and ast.unparse(n.func) == "indigo.server.log"
+        ]
+        self.assertEqual(len(found), 1,
+            msg="Expected exactly the rename notice to remain in deviceUpdated.")
+
+
+# ======================================
+# TEST: THE NEW PREF IS WIRED UP EVERYWHERE
+# ======================================
+
+class TestActivityPrefPlumbing(unittest.TestCase):
+    """The pref has four touch points and every one of them has been
+    forgotten at least once in this plugin's history: __init__, the config
+    dialog, the menu toggle and the PluginConfig.xml field itself."""
+
+    def setUp(self):
+        mock_indigo.server.log.reset_mock()
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+
+    def test_closed_prefs_config_ui_applies_it_immediately(self):
+        plugin = make_plugin()
+        plugin.closedPrefsConfigUi(
+            {"logActivityToEventLog": True, "logEnabled": True,
+             "groupEnabled": True, "timestampEnabled": True}, False)
+        self.assertTrue(plugin.activity_to_event_log)
+
+        plugin.closedPrefsConfigUi(
+            {"logActivityToEventLog": False, "logEnabled": True,
+             "groupEnabled": True, "timestampEnabled": True}, False)
+        self.assertFalse(plugin.activity_to_event_log)
+
+    def test_closed_prefs_config_ui_defaults_a_missing_key_to_quiet(self):
+        """An older saved dialog has no such key; it must not read as on."""
+        plugin = make_plugin({"logActivityToEventLog": True})
+        plugin.closedPrefsConfigUi({"logEnabled": True}, False)
+        self.assertFalse(plugin.activity_to_event_log)
+
+    def test_menu_toggle_flips_and_persists_it(self):
+        plugin = make_plugin()
+        plugin.savePluginPrefs = MagicMock()
+        plugin.menuToggleActivityInEventLog()
+
+        self.assertTrue(plugin.activity_to_event_log)
+        self.assertTrue(plugin.pluginPrefs["logActivityToEventLog"])
+        plugin.savePluginPrefs.assert_called()
+
+        plugin.menuToggleActivityInEventLog()
+        self.assertFalse(plugin.activity_to_event_log)
+        self.assertFalse(plugin.pluginPrefs["logActivityToEventLog"])
+
+    def test_show_plugin_info_reports_it(self):
+        plugin = make_plugin()
+        mock_indigo.server.log.reset_mock()
+        plugin.showPluginInfo()
+
+        text = " ".join(server_log_messages())
+        self.assertIn("Activity in Event Log", text)
+
+    def test_startup_line_reports_it(self):
+        plugin = make_plugin()
+        plugin.startup()
+
+        text = " ".join(_logger_messages(plugin, "info"))
+        self.assertIn("ActivityInEventLog", text)
+
+    def test_plugin_config_xml_offers_the_field_defaulting_to_quiet(self):
+        """The checkbox has to exist, default false, and not collide."""
+        import collections
+        import xml.etree.ElementTree as ET
+        path = os.path.join(os.path.dirname(_plugin_path), "PluginConfig.xml")
+        root = ET.parse(path).getroot()
+        fields = {f.get("id"): f for f in root.iter("Field")}
+
+        self.assertIn("logActivityToEventLog", fields)
+        self.assertEqual(
+            fields["logActivityToEventLog"].get("type"), "checkbox")
+        self.assertEqual(
+            (fields["logActivityToEventLog"].get("defaultValue") or "").lower(),
+            "false",
+            msg="The quiet behaviour is the default - that is the whole point.")
+
+        ids = [f.get("id") for f in root.iter("Field")]
+        dupes = [i for i, n in collections.Counter(ids).items() if n > 1]
+        self.assertEqual(dupes, [],
+            msg="A duplicate Field id stops the whole dialog opening.")
+
+    def test_menu_item_callback_exists(self):
+        """A MenuItems.xml callback that names no method is a dead menu item."""
+        import xml.etree.ElementTree as ET
+        path = os.path.join(os.path.dirname(_plugin_path), "MenuItems.xml")
+        root = ET.parse(path).getroot()
+        callbacks = [m.findtext("CallbackMethod") for m in root.iter("MenuItem")]
+
+        self.assertIn("menuToggleActivityInEventLog", callbacks)
+        for name in [c for c in callbacks if c]:
+            self.assertTrue(hasattr(Plugin, name),
+                msg=f"MenuItems.xml calls {name}, which Plugin does not define.")
+
+
+
+# ======================================
+# TEST: THE DEBUG PREF CANNOT SILENTLY UNDO THE QUIET DEFAULT
+#
+# Every other route into the shared event log is now a deliberate choice.
+# showDebugInfo is not: Indigo's PluginBase turns self.debug into a property
+# whose setter reads "if value:" and lowers indigo_log_handler to DEBUG on
+# anything truthy. bool("false") is True, so a pref holding a string - which
+# is how Indigo re-serialises a saved textfield or menu value - would put the
+# full narration back into the log this change exists to keep clean, with the
+# checkbox in the dialog still showing unticked.
+# ======================================
+
+class TestDebugPrefCoercion(unittest.TestCase):
+
+    def setUp(self):
+        mock_indigo.server.log.reset_mock()
+        mock_indigo.devices   = make_device_registry()
+        mock_indigo.variables = make_variable_registry()
+
+    def test_a_string_false_does_not_turn_debug_on(self):
+        for junk in ("false", "0", "no", "off", "f", ""):
+            with self.subTest(pref=junk):
+                plugin = make_plugin({"showDebugInfo": junk})
+                self.assertIs(plugin.debug, False,
+                    msg=f"pref {junk!r} must not read as debug on")
+
+    def test_a_string_false_leaves_the_event_log_handler_at_info(self):
+        """The consequence, not the symptom.
+
+        The handler level is what actually decides whether the narration
+        reaches the shared event log, so that is what this asserts. A
+        mutation that swaps as_bool back for bool() turns this red.
+        """
+        plugin = make_plugin({"showDebugInfo": "false"})
+        plugin.indigo_log_handler.setLevel.assert_called_with(logging.INFO)
+
+    def test_an_unrecognised_string_falls_back_to_quiet(self):
+        """as_bool returns the DEFAULT for junk, and the default here is off.
+
+        Guessing True would be the expensive direction: it re-floods a log
+        the whole estate shares, and nothing would say why.
+        """
+        plugin = make_plugin({"showDebugInfo": "maybe"})
+        self.assertIs(plugin.debug, False)
+
+    def test_an_absent_pref_is_quiet(self):
+        plugin = make_plugin()
+        self.assertIs(plugin.debug, False)
+        plugin.indigo_log_handler.setLevel.assert_called_with(logging.INFO)
+
+    def test_a_genuine_request_for_debug_is_still_honoured(self):
+        """The mirror case, so the coercion is not simply always-False."""
+        for truthy in (True, "true", "1", "yes", "on", "t"):
+            with self.subTest(pref=truthy):
+                plugin = make_plugin({"showDebugInfo": truthy})
+                self.assertIs(plugin.debug, True)
+                plugin.indigo_log_handler.setLevel.assert_called_with(
+                    logging.DEBUG)
+
+    def test_the_config_dialog_path_coerces_it_too(self):
+        """closedPrefsConfigUi is a second, separate read of the same pref."""
+        plugin = make_plugin({"showDebugInfo": True})
+        plugin.closedPrefsConfigUi({"showDebugInfo": "false"}, False)
+        self.assertIs(plugin.debug, False)
+        plugin.indigo_log_handler.setLevel.assert_called_with(logging.INFO)
+
+    def test_the_other_toggles_are_coerced_the_same_way(self):
+        """Same hazard, opposite default: these three default ON, so a junk
+        string read through bool() would report a toggle the user switched
+        off as still on."""
+        plugin = make_plugin({"logEnabled": "false",
+                              "groupEnabled": "false",
+                              "timestampEnabled": "false"})
+        self.assertIs(plugin.log_enabled, False)
+        self.assertIs(plugin.group_enabled, False)
+        self.assertIs(plugin.timestamp_enabled, False)
+
+    def test_no_pref_is_read_with_a_bare_bool(self):
+        """Structural guard: bool() on a pref read is the bug this fixes.
+
+        Parsed, not grepped, so a comment or changelog line mentioning
+        bool() cannot satisfy or break it.
+        """
+        import ast
+        tree = ast.parse(io_open_plugin_source())
+        offenders = []
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef):
+                continue
+            if func.name not in ("__init__", "closedPrefsConfigUi"):
+                continue
+            for node in ast.walk(func):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "bool"):
+                    continue
+                inner = ast.unparse(node)
+                if "pluginPrefs" in inner or "valuesDict" in inner:
+                    offenders.append(f"{func.name}: {inner[:80]}")
+        self.assertEqual(offenders, [],
+            msg="Prefs must be read through as_bool - bool('false') is True.")
+
+    def test_the_guard_above_can_actually_see_a_violation(self):
+        """A structural guard that can never match passes vacuously.
+
+        Feeds it the exact shape it is meant to catch and requires a hit, so
+        the guard is proved able to fail before its silence is believed.
+        """
+        import ast
+        sample = ast.parse(
+            "class P:\n"
+            "    def __init__(self, pluginPrefs):\n"
+            "        self.debug = bool(pluginPrefs.get('showDebugInfo', False))\n"
+        )
+        found = [
+            n for func in ast.walk(sample)
+            if isinstance(func, ast.FunctionDef) and func.name == "__init__"
+            for n in ast.walk(func)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == "bool" and "pluginPrefs" in ast.unparse(n)
+        ]
+        self.assertEqual(len(found), 1,
+            msg="The guard cannot see the very shape it exists to reject.")
+
+
+# ======================================
+# TEST: THE DIALOG DESCRIBES WHAT THE PLUGIN ACTUALLY DOES
+#
+# The dialog is the only explanation most users will ever read, and it went
+# stale the moment the destination changed: it still counted three toggles
+# beside a fourth, and the master switch still promised the event log. None
+# of it is caught by running the plugin, because a plugin never reads its
+# own ConfigUI XML - the Indigo client does, once, when the user opens it.
+# ======================================
+
+class TestPluginConfigDescriptions(unittest.TestCase):
+
+    NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four",
+                    5: "five", 6: "six", 7: "seven", 8: "eight"}
+
+    @staticmethod
+    def _config_root():
+        import xml.etree.ElementTree as ET
+        path = os.path.join(os.path.dirname(_plugin_path), "PluginConfig.xml")
+        return ET.parse(path).getroot()
+
+    @staticmethod
+    def _menu_toggle_callbacks():
+        import xml.etree.ElementTree as ET
+        path = os.path.join(os.path.dirname(_plugin_path), "MenuItems.xml")
+        root = ET.parse(path).getroot()
+        return [c for c in (m.findtext("CallbackMethod")
+                            for m in root.iter("MenuItem"))
+                if c and c.startswith("menuToggle")]
+
+    def _description(self, field_id):
+        for field in self._config_root().iter("Field"):
+            if field.get("id") == field_id:
+                return (field.findtext("Description") or "")
+        self.fail(f"PluginConfig.xml has no field {field_id}")
+
+    def test_the_intro_counts_the_toggles_correctly(self):
+        """The count in the intro is prose, so nothing else can check it.
+
+        It said "three" for a week after the fourth toggle arrived directly
+        beneath it, which is how a reader learns to distrust the dialog.
+        """
+        toggles = self._menu_toggle_callbacks()
+        intro = ""
+        for field in self._config_root().iter("Field"):
+            if field.get("id") == "infoLabel":
+                intro = (field.findtext("Label") or "").lower()
+        self.assertTrue(intro, "PluginConfig.xml has no infoLabel")
+
+        word = self.NUMBER_WORDS[len(toggles)]
+        self.assertIn(f"{word} toggles", intro,
+            msg=f"The intro must say '{word} toggles' - there are "
+                f"{len(toggles)} menu toggles: {toggles}")
+        for wrong in set(self.NUMBER_WORDS.values()) - {word}:
+            self.assertNotIn(f"{wrong} toggles", intro,
+                msg=f"The intro also claims '{wrong} toggles'.")
+
+    def test_every_menu_toggle_has_a_field_in_the_dialog(self):
+        """The intro promises the menu mirrors the dialog. Hold it to that."""
+        field_ids = {f.get("id") for f in self._config_root().iter("Field")}
+        prefs = {"menuToggleDeviceChangeLog":     "logEnabled",
+                 "menuToggleGroupTriggers":       "groupEnabled",
+                 "menuToggleTimestamps":          "timestampEnabled",
+                 "menuToggleActivityInEventLog":  "logActivityToEventLog"}
+        for callback in self._menu_toggle_callbacks():
+            self.assertIn(callback, prefs,
+                msg=f"New menu toggle {callback} - add its pref here and to "
+                    f"PluginConfig.xml.")
+            self.assertIn(prefs[callback], field_ids,
+                msg=f"{callback} flips a pref with no field in the dialog.")
+
+    def test_the_master_switch_no_longer_promises_the_event_log(self):
+        """It read 'write ... to the event log', which stopped being true.
+
+        Two fields contradicting each other is worse than either being
+        wrong on its own: the reader cannot tell which to believe.
+        """
+        text = self._description("logEnabled").lower()
+        self.assertIn("own log", text,
+            msg="The master switch must say where the changes actually go.")
+        self.assertNotIn("write monitored device and variable changes to the "
+                         "event log", text,
+            msg="That is the pre-change wording, and it is now false.")
+
+    def test_the_event_log_field_admits_the_master_switch_can_silence_it(self):
+        """It claimed the changes ALWAYS reach the plugin's own log.
+
+        They do not: deviceUpdated returns on 'if not self.log_enabled'
+        before any narration is produced, so that checkbox silences both
+        routes and this field has to say so.
+        """
+        text = self._description("logActivityToEventLog").lower()
+        self.assertNotIn("always", text,
+            msg="Nothing here is unconditional - the master switch outranks it.")
+        self.assertIn("device change log", text,
+            msg="This field must name the switch that can silence it.")
+
+    def test_the_master_switch_really_does_silence_both_routes(self):
+        """The claim above, checked against the code rather than trusted."""
+        plugin = make_plugin({"logEnabled": False,
+                              "logActivityToEventLog": True})
+        orig = MockDevice(812537401, "Basin Occupancy Sensor", on_state=False)
+        new  = MockDevice(812537401, "Basin Occupancy Sensor", on_state=True)
+        plugin.deviceUpdated(orig, new)
+
+        self.assertEqual(event_log_messages(plugin), [])
+        self.assertEqual(plugin_file_messages(plugin), [],
+            msg="With the master switch off there is no narration at all.")
+
+    def test_the_debug_field_warns_that_it_overrides_the_quiet_default(self):
+        """The one route left that puts the narration back, so it is named."""
+        text = self._description("showDebugInfo").lower()
+        self.assertIn("event log", text,
+            msg="Debug logging re-routes the narration; the field must say so.")
+
 
 
 # ======================================

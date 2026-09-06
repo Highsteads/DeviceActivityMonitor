@@ -39,6 +39,11 @@
         <CallbackMethod>menuToggleTimestamps</CallbackMethod>
     </MenuItem>
 
+    <MenuItem id="toggleActivityInEventLog">
+        <Name>Toggle Activity in Indigo Event Log (on/off)</Name>
+        <CallbackMethod>menuToggleActivityInEventLog</CallbackMethod>
+    </MenuItem>
+
     <MenuItem id="sep3" isSeparator="true"/>
 
     <MenuItem id="showPluginInfo">

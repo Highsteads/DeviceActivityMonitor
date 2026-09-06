@@ -4,7 +4,7 @@
 # Description: Device Activity Monitor - subscribes to device and variable changes and logs events
 # Author:      CliveS & Claude Opus 4.8
 # Date:        21-07-2026
-# Version:     1.10.2
+# Version:     1.11.0
 #
 # v1.10.1 (21-07-2026): shared plugin_utils.py refreshed to v1.3 — the
 # estate-wide propagation of the four Appliance Monitor deep-review fixes.
@@ -296,6 +296,25 @@ try:
     from plugin_utils import log_startup_banner
 except ImportError:
     log_startup_banner = None
+try:
+    from plugin_utils import as_bool
+except ImportError:
+    # Fallback so the module still imports when plugin_utils is absent.
+    # Deliberately NOT bool(): bool("false") is True, and for a pref that
+    # defaults to quiet that failure direction re-floods the shared event log.
+    def as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if value is None or value == "":
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        s = str(value).strip().lower()
+        if s in ("true", "1", "yes", "on", "t"):
+            return True
+        if s in ("false", "0", "no", "off", "f"):
+            return False
+        return default
 
 # ======================================
 # CONFIG FILE PATH
@@ -516,13 +535,32 @@ class Plugin(indigo.PluginBase):
 
     def __init__(self, pluginId, pluginDisplayName, pluginVersion, pluginPrefs):
         super().__init__(pluginId, pluginDisplayName, pluginVersion, pluginPrefs)
-        self.debug = pluginPrefs.get("showDebugInfo", False)
+        # as_bool, not bool() and not the bare value: PluginBase's debug
+        # setter (plugin_base.py, "if value:") drops indigo_log_handler to
+        # DEBUG on anything truthy, and a stored string "false" is truthy.
+        # That one line would put the whole activity narration straight back
+        # into the shared event log, whatever logActivityToEventLog says -
+        # it is the only remaining route that can defeat the quiet default.
+        self.debug = as_bool(pluginPrefs.get("showDebugInfo"), False)
 
-        # Runtime toggles (v1.9.5) — flipped via menu items, persisted in pluginPrefs.
-        # All default ON so existing installs behave identically after upgrade.
-        self.log_enabled       = bool(pluginPrefs.get("logEnabled",       True))
-        self.group_enabled     = bool(pluginPrefs.get("groupEnabled",     True))
-        self.timestamp_enabled = bool(pluginPrefs.get("timestampEnabled", True))
+        # Runtime toggles (v1.9.5) - flipped via menu items, persisted in
+        # pluginPrefs. All default ON so existing installs behave identically
+        # after upgrade. as_bool for the same reason as above: bool("false")
+        # is True, so a pref holding a string would read as the opposite of
+        # what the user ticked.
+        self.log_enabled       = as_bool(pluginPrefs.get("logEnabled"),       True)
+        self.group_enabled     = as_bool(pluginPrefs.get("groupEnabled"),     True)
+        self.timestamp_enabled = as_bool(pluginPrefs.get("timestampEnabled"), True)
+
+        # Where the activity narration goes (new). Defaults to OFF, i.e. the
+        # plugin's own log file only. The narration is one line per monitored
+        # state change and it does not stop growing: measured on the author's
+        # estate over the 7 days to 06-09-2026 it was 5,529 lines, 790 a day,
+        # about a third of every line in the shared Indigo event log. Existing
+        # installs therefore go quiet on upgrade, which is the point; a user
+        # who reads the event log as an activity feed ticks this to get it back.
+        self.activity_to_event_log = as_bool(
+            pluginPrefs.get("logActivityToEventLog"), False)
 
         # Group-change machinery. damGroup devices are the only source of
         # truth (v1.8.1+). _rebuild_group_index() recomputes group_members
@@ -544,6 +582,42 @@ class Plugin(indigo.PluginBase):
             return ""
         return f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] "
 
+    # ----- activity narration -----
+    def _log_activity(self, message):
+        """Write one line of routine activity narration.
+
+        Activity is the per-change narration: a monitored device changing
+        state, a monitored variable changing value. It is the plugin's
+        commentary, not its product - the product is the group triggers - and
+        it is the only part of the plugin that grows without bound, one line
+        per sensor trip for ever.
+
+        It used to go straight to the shared Indigo event log via
+        indigo.server.log(), which no preference could stop. That log is the
+        whole estate's dashboard, and this plugin alone was putting 790 lines
+        a day into it (5,529 lines over the 7 days to 06-09-2026, roughly a
+        third of every line in it).
+
+        Both routes below reach the plugin's own log file, because Indigo
+        gives self.logger a file handler at THREADDEBUG and an event-log
+        handler at INFO. So .info() lands in both and .debug() lands in the
+        file only, and nothing is lost either way - the narration simply stops
+        filling a log it does not own unless the user asks for it.
+
+        Faults never come through here: warnings and errors stay on
+        self.logger.warning/error so they keep reaching the event log, which
+        is the only log Log_Error_Watch.py reads.
+
+        One deliberate exception: with "Enable debug logging" ticked, Indigo
+        drops indigo_log_handler to DEBUG and the narration reappears in the
+        event log. That is what asking for verbose troubleshooting means, and
+        it is a setting nobody leaves on.
+        """
+        if self.activity_to_event_log:
+            self.logger.info(message)
+        else:
+            self.logger.debug(message)
+
     def startup(self):
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
@@ -556,7 +630,9 @@ class Plugin(indigo.PluginBase):
         self.logger.info(
             f"Toggles: DeviceChangeLog={'on' if self.log_enabled else 'off'}, "
             f"GroupTriggers={'on' if self.group_enabled else 'off'}, "
-            f"Timestamps={'on' if self.timestamp_enabled else 'off'}"
+            f"Timestamps={'on' if self.timestamp_enabled else 'off'}, "
+            f"ActivityInEventLog="
+            f"{'on' if self.activity_to_event_log else 'off (plugin log only)'}"
         )
         self._validate_monitored_devices()
         self._validate_monitored_variables()
@@ -601,6 +677,10 @@ class Plugin(indigo.PluginBase):
             return
 
         # --- Name change detection ---
+        # Deliberately NOT routed through _log_activity. A rename is a rare
+        # configuration event, not per-change narration - none at all in the
+        # 7 days to 06-09-2026 - and it tells the user a config entry may now
+        # name the wrong thing, so it stays where they will see it.
         if origDev.name != newDev.name:
             indigo.server.log(
                 f"{self._ts()}[Device Activity Monitor] Device renamed: "
@@ -654,11 +734,15 @@ class Plugin(indigo.PluginBase):
 
             # Suppress the label if it is identical to the device name to
             # avoid e.g. "Side Passage Motion Side Passage Motion OFF"
+            #
+            # Routed through _log_activity rather than indigo.server.log: this
+            # single pair of calls was 790 lines a day in the shared event log
+            # (7 days to 06-09-2026), the biggest contributor in the estate.
             ts = self._ts()
             if label == newDev.name:
-                indigo.server.log(f"{ts}{newDev.name} {state_text}")
+                self._log_activity(f"{ts}{newDev.name} {state_text}")
             else:
-                indigo.server.log(f"{ts}{newDev.name} {label} {state_text}")
+                self._log_activity(f"{ts}{newDev.name} {label} {state_text}")
 
     # ======================================
     # DEVICE DELETED CALLBACK
@@ -710,6 +794,7 @@ class Plugin(indigo.PluginBase):
             return
 
         # --- Name change detection ---
+        # Stays in the event log for the same reason as the device rename above.
         if origVar.name != newVar.name:
             indigo.server.log(
                 f"{self._ts()}[Device Activity Monitor] Variable renamed: "
@@ -723,7 +808,10 @@ class Plugin(indigo.PluginBase):
         config = self.variable_monitor[newVar.id]
         label  = config.get("label", newVar.name)
 
-        indigo.server.log(
+        # Same class as the device narration above: one line per change, for
+        # ever. A chatty variable (a lux level, a counter) is as noisy as any
+        # sensor, so it follows the same route.
+        self._log_activity(
             f"{self._ts()}{label}: {origVar.value} -> {newVar.value}"
         )
 
@@ -2077,6 +2165,8 @@ class Plugin(indigo.PluginBase):
             ("Device Change Log:",     "ON" if self.log_enabled       else "OFF"),
             ("Group Change Triggers:", "ON" if self.group_enabled     else "OFF"),
             ("Timestamps in Log:",     "ON" if self.timestamp_enabled else "OFF"),
+            ("Activity in Event Log:",
+             "ON" if self.activity_to_event_log else "OFF (plugin log only)"),
         ]
         if log_startup_banner:
             log_startup_banner(
@@ -2089,15 +2179,25 @@ class Plugin(indigo.PluginBase):
                 indigo.server.log(f"  {label} {value}")
 
     def closedPrefsConfigUi(self, valuesDict, userCancelled):
-        """Apply PluginConfig changes immediately (v1.10.0) — mirrors the
+        """Apply PluginConfig changes immediately (v1.10.0) - mirrors the
         __init__ pref reads so the dialog and the toggle menu items stay in
-        step. Checkbox values arrive as real bools."""
+        step.
+
+        A saved checkbox pref comes back as a real bool, but what a ConfigUI
+        dialog hands this callback is a different path and is not measured,
+        so every read here goes through as_bool as well. It costs nothing and
+        the question never arises again.
+        """
         if userCancelled:
             return
-        self.debug             = bool(valuesDict.get("showDebugInfo", False))
-        self.log_enabled       = bool(valuesDict.get("logEnabled",       True))
-        self.group_enabled     = bool(valuesDict.get("groupEnabled",     True))
-        self.timestamp_enabled = bool(valuesDict.get("timestampEnabled", True))
+        # showDebugInfo especially: see the note in __init__ - a truthy string
+        # here lowers the event-log handler to DEBUG and re-floods it.
+        self.debug             = as_bool(valuesDict.get("showDebugInfo"),    False)
+        self.log_enabled       = as_bool(valuesDict.get("logEnabled"),       True)
+        self.group_enabled     = as_bool(valuesDict.get("groupEnabled"),     True)
+        self.timestamp_enabled = as_bool(valuesDict.get("timestampEnabled"), True)
+        self.activity_to_event_log = as_bool(
+            valuesDict.get("logActivityToEventLog"), False)
 
     # ----- toggle helpers -----
     def _set_flag(self, pref_key, attr_name, label):
@@ -2122,3 +2222,7 @@ class Plugin(indigo.PluginBase):
 
     def menuToggleTimestamps(self):
         self._set_flag("timestampEnabled", "timestamp_enabled", "Timestamps in Log")
+
+    def menuToggleActivityInEventLog(self):
+        self._set_flag("logActivityToEventLog", "activity_to_event_log",
+                       "Activity in Indigo Event Log")

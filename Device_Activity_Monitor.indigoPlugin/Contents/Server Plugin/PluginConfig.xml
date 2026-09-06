@@ -2,12 +2,12 @@
 <PluginConfig>
 
     <Field id="infoLabel" type="label" fontSize="small">
-        <Label>Runtime behaviour. The three toggles below are also available as menu items (Plugins > Device Activity Monitor) for quick flips without opening this dialog.</Label>
+        <Label>Runtime behaviour. The four toggles below - everything above the debug separator - are also available as menu items (Plugins > Device Activity Monitor) for quick flips without opening this dialog.</Label>
     </Field>
 
     <Field id="logEnabled" type="checkbox" defaultValue="true">
         <Label>Device change log:</Label>
-        <Description>Write monitored device and variable changes to the event log</Description>
+        <Description>Master switch for the change narration. Off writes nothing anywhere. On, each monitored device and variable change goes to this plugin's own log file, and to the shared Indigo event log as well only if "Activity in the Indigo event log" below is ticked.</Description>
     </Field>
 
     <Field id="groupEnabled" type="checkbox" defaultValue="true">
@@ -20,11 +20,16 @@
         <Description>Prefix plugin log lines with [HH:MM:SS.mmm]</Description>
     </Field>
 
+    <Field id="logActivityToEventLog" type="checkbox" defaultValue="false">
+        <Label>Activity in the Indigo event log:</Label>
+        <Description>Also write each monitored change to the shared Indigo event log. Off by default: the changes still go to this plugin's own log file (Logs folder), and one line per sensor trip fills the log every other plugin shares. This adds a destination rather than choosing one, so it does nothing while "Device change log" above is off - that switch silences both routes. Tick this if you read the event log as an activity feed.</Description>
+    </Field>
+
     <Field id="sepDebug" type="separator"/>
 
     <Field id="showDebugInfo" type="checkbox" defaultValue="false">
         <Label>Enable debug logging:</Label>
-        <Description>Verbose logging for troubleshooting</Description>
+        <Description>Verbose logging for troubleshooting. While this is on Indigo lowers the event-log handler to DEBUG, so the change narration reappears in the shared event log whatever "Activity in the Indigo event log" is set to.</Description>
     </Field>
 
 </PluginConfig>
