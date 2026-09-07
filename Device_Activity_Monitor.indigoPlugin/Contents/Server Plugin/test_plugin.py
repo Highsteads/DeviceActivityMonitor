@@ -2953,10 +2953,22 @@ class TestPluginConfigDescriptions(unittest.TestCase):
                 if c and c.startswith("menuToggle")]
 
     def _description(self, field_id):
-        for field in self._config_root().iter("Field"):
-            if field.get("id") == field_id:
-                return (field.findtext("Description") or "")
-        self.fail(f"PluginConfig.xml has no field {field_id}")
+        """The user-visible help for a setting, wherever the XML keeps it.
+
+        A <Description> is drawn on one line and never wraps, so the longest one
+        in a dialog stretches every row past the window. Prose longer than a
+        phrase therefore lives in the companion `label_<id>_info` field beside
+        the control (v1.10.2). These tests are about what the user READS, so
+        both are searched — the checks below are unchanged by the move.
+        """
+        fields = {f.get("id"): f for f in self._config_root().iter("Field")}
+        if field_id not in fields:
+            self.fail(f"PluginConfig.xml has no field {field_id}")
+        parts = [fields[field_id].findtext("Description") or ""]
+        companion = fields.get(f"label_{field_id}_info")
+        if companion is not None:
+            parts.append(companion.findtext("Label") or "")
+        return " ".join(p for p in parts if p).strip()
 
     def test_the_intro_counts_the_toggles_correctly(self):
         """The count in the intro is prose, so nothing else can check it.
