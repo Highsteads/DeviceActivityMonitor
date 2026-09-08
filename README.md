@@ -1,8 +1,8 @@
 # Device Activity Monitor — Indigo Plugin
 
-**Version**: 1.10.1
-**Author**: CliveS
-**Platform**: Indigo 2022.1 or later / macOS / Python 3.10+
+**Version:** 1.11.1
+**Author:** CliveS
+**Platform:** Indigo 2022.1 or later / macOS / Python 3.10+
 
 *Developed and tested on Indigo 2025.2 / Python 3.13. Older Indigo releases that meet the minimum API version above should also work — the API floor is what Indigo's plugin loader actually checks.*
 **Plugin ID**: `com.clives.indigoplugin.deviceactivitymonitor`
